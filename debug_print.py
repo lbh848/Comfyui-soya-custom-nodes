@@ -1,4 +1,4 @@
-class DebugPrint:
+class DebugPrint_mdsoya:
     OUTPUT_NODE = True
 
     @classmethod

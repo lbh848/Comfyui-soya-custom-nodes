@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-class MaskProportionalExpand:
+class MaskProportionalExpand_mdsoya:
     @classmethod
     def INPUT_TYPES(s):
         return {

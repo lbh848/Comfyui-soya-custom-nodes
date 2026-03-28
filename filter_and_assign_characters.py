@@ -5,7 +5,7 @@ import math
 import comfy.clip_vision
 
 
-class FilterAndAssignCharacters:
+class FilterAndAssignCharacters_mdsoya:
     """
     요구사항16.md 기반:
     1) prompt에서 character_names 중 언급된 이름과 인덱스만 추출

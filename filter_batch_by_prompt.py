@@ -1,7 +1,7 @@
 import torch
 
 
-class FilterBatchByPrompt:
+class FilterBatchByPrompt_mdsoya:
     """
     prompt에 포함된 이름만 batch_names와 batch_images에서 필터링하여 반환합니다.
     """

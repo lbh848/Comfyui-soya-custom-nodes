@@ -1,4 +1,4 @@
-class BBoxDebug:
+class BBoxDebug_mdsoya:
     """
     Debug node that outputs bbox values from segs for debugging purposes.
     """

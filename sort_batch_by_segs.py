@@ -1,6 +1,6 @@
 import torch
 
-class SortBatchBySegsBBox:
+class SortBatchBySegsBBox_mdsoya:
     """
     Sorts batch data (images or masks) based on segs bbox x-coordinate (left to right).
 

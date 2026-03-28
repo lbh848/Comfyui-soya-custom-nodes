@@ -3,7 +3,7 @@ import numpy as np
 import scipy.ndimage
 
 
-class MaskShapeExpand:
+class MaskShapeExpand_mdsoya:
     """
     Expands a mask while preserving its actual shape using morphological dilation.
     Unlike bbox-based scaling, this respects the mask's contours and irregular shapes.

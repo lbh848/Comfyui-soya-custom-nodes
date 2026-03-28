@@ -2,7 +2,7 @@ import re
 import math
 import matplotlib.colors as mcolors
 
-class IdentifyCharacters:
+class IdentifyCharacters_mdsoya:
     """
     Identifies characters from cropped face tags based on the main prompt and character dictionary.
     """

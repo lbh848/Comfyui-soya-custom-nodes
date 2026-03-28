@@ -10,7 +10,7 @@ except ImportError:
     ImpactSEG = None
 
 
-class AlignSegsToMaskBatch:
+class AlignSegsToMaskBatch_mdsoya:
     @classmethod
     def INPUT_TYPES(cls):
         return {

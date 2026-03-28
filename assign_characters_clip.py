@@ -5,7 +5,7 @@ import math
 import comfy.clip_vision
 import comfy.model_management
 
-class AssignCharactersCLIP:
+class AssignCharactersCLIP_mdsoya:
     @classmethod
     def INPUT_TYPES(s):
         return {

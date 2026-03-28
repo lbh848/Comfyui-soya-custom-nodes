@@ -5,7 +5,7 @@ import os
 import urllib.request
 
 
-class AnimeBlinkDetector:
+class AnimeBlinkDetector_mdsoya:
     """
     애니메이션 캐릭터 눈 깜빡임 감지 노드.
     lbpcascade_animeface + 암색 픽셀 비율 기반.

@@ -1,4 +1,4 @@
-class MergeSegs:
+class MergeSegs_mdsoya:
     """
     Merges multiple segs (from batch/list input) into a single segs.
 

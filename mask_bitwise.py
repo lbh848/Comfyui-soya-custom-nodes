@@ -1,6 +1,6 @@
 import torch
 
-class MaskBitwiseAnd:
+class MaskBitwiseAnd_mdsoya:
     """
     Performs bitwise AND operation between a batch of masks and a single mask.
 
@@ -59,7 +59,7 @@ class MaskBitwiseAnd:
         return (result_list,)
 
 
-class MaskBitwiseOr:
+class MaskBitwiseOr_mdsoya:
     """
     Performs bitwise OR operation between a batch of masks and a single mask.
 
@@ -117,7 +117,7 @@ class MaskBitwiseOr:
         return (result_list,)
 
 
-class MaskBitwiseAndBatch:
+class MaskBitwiseAndBatch_mdsoya:
     """
     Performs bitwise AND operation between two batches of masks by index.
 
@@ -155,7 +155,7 @@ class MaskBitwiseAndBatch:
         return ([result[i] for i in range(result.shape[0])],)
 
 
-class MaskBitwiseOrBatch:
+class MaskBitwiseOrBatch_mdsoya:
     """
     Performs bitwise OR operation between two batches of masks by index.
 

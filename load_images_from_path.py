@@ -9,7 +9,7 @@ import node_helpers
 SUPPORTED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.webp', '.tiff', '.tif', '.gif'}
 
 
-class LoadImagesFromPath:
+class LoadImagesFromPath_mdsoya:
     """
     Loads all images from a directory path and outputs them as a batch.
     Also outputs the filenames as a string batch.

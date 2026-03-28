@@ -16,7 +16,7 @@ if not os.path.exists(model_path):
     print(f"Downloading MediaPipe FaceLandmarker model to {model_path}...")
     urllib.request.urlretrieve(model_url, model_path)
 
-class MediaPipeEyeDetector:
+class MediaPipeEyeDetector_mdsoya:
     def __init__(self):
         # MediaPipe Tasks API 모드로 초기화 (Python 3.12+ 등에서 solutions 어트리뷰트 에러 방지)
         base_options = python.BaseOptions(model_asset_path=model_path)
@@ -94,5 +94,4 @@ class MediaPipeEyeDetector:
             
         return (is_closed_list, ear_value_list)
 
-NODE_CLASS_MAPPINGS = {"MediaPipeEyeDetector": MediaPipeEyeDetector}
 
