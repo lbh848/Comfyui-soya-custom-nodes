@@ -28,6 +28,10 @@ class LoadImagesFromPath_mdsoya:
     RETURN_NAMES = ("images", "filenames")
     FUNCTION = "load_images"
     CATEGORY = "Soya/Image"
+
+    @classmethod
+    def IS_CHANGED(cls, path):
+        return float("nan")
     OUTPUT_IS_LIST = (False, True)
 
     def load_images(self, path):

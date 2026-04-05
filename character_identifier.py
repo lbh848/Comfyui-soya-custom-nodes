@@ -378,7 +378,12 @@ class IdentifyCharacters_mdsoya:
         entries = []
         for i in range(len(char_names)):
             gender_display = "boy" if genders[i] == "male" else "girl"
-            entry = f"{eye_colors[i]}, {gender_display}, {char_names[i]}, {enhance_prompts[i]}, {common}"
+            parts = [eye_colors[i], gender_display, char_names[i]]
+            if enhance_prompts[i]:
+                parts.append(enhance_prompts[i])
+            if common:
+                parts.append(common)
+            entry = ", ".join(parts)
             entries.append(entry)
 
         result = f"{asc}\n" + "\n".join([f"[{i+1}] {e}" for i, e in enumerate(entries)])
@@ -386,7 +391,12 @@ class IdentifyCharacters_mdsoya:
         # 결과가 batch_size보다 부족하면 더미값으로 채움
         while len(entries) < batch_size:
             print(f"[IdentifyCharacters] Padding result with dummy value")
-            dummy_entry = f"black eyes, girl, unknown, {female_enhance}, {common}"
+            dummy_parts = ["black eyes", "girl", "unknown"]
+            if female_enhance:
+                dummy_parts.append(female_enhance)
+            if common:
+                dummy_parts.append(common)
+            dummy_entry = ", ".join(dummy_parts)
             entries.append(dummy_entry)
             result = f"{asc}\n" + "\n".join([f"[{i+1}] {e}" for i, e in enumerate(entries)])
 

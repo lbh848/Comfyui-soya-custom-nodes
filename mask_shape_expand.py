@@ -5,9 +5,11 @@ import scipy.ndimage
 
 class MaskShapeExpand_mdsoya:
     """
-    Expands a mask while preserving its actual shape using morphological dilation.
+    Expands or shrinks a mask while preserving its actual shape using morphological operations.
     Unlike bbox-based scaling, this respects the mask's contours and irregular shapes.
-    The dilation radius is calculated proportionally from the mask's bounding box size.
+    scale_factor > 1.0: expands (dilation)
+    scale_factor < 1.0: shrinks (erosion)
+    scale_factor = 1.0: no change
     """
 
     @classmethod
@@ -52,21 +54,44 @@ class MaskShapeExpand_mdsoya:
             # Radius of expansion (how many pixels to dilate outward)
             radius = (target_dim - avg_dim) / 2.0
 
-            if radius <= 0:
+            if radius == 0:
                 out_masks.append(m.unsqueeze(0))
+                continue
+
+            if radius < 0:
+                # Erosion: shrink the mask
+                shrink_r = abs(radius)
+                r_int = max(1, int(round(shrink_r)))
+
+                binary = (m.numpy() > 0)
+                dist = scipy.ndimage.distance_transform_edt(binary)
+                result = (dist >= shrink_r).astype(np.float64)
+
+                out = torch.from_numpy(result.astype(m.numpy().dtype))
+                out_masks.append(out.unsqueeze(0))
                 continue
 
             r_int = max(1, int(round(radius)))
 
-            # Circular structuring element for shape-preserving dilation
-            y_k, x_k = np.ogrid[-r_int:r_int + 1, -r_int:r_int + 1]
-            kernel = (x_k * x_k + y_k * y_k) <= (r_int * r_int)
+            # bbox + radius 영역만 크롭해서 처리 (이미지 전체 대신)
+            cy1 = max(0, y_min - r_int)
+            cy2 = min(H, y_max + r_int + 1)
+            cx1 = max(0, x_min - r_int)
+            cx2 = min(W, x_max + r_int + 1)
 
-            m_np = m.numpy().astype(np.float64)
-            result = scipy.ndimage.grey_dilation(m_np, footprint=kernel)
+            cropped = m[cy1:cy2, cx1:cx2]
+            cropped_np = cropped.numpy()
+            binary = cropped_np > 0
 
-            out_masks.append(
-                torch.from_numpy(result.astype(m.numpy().dtype)).unsqueeze(0)
-            )
+            # Distance transform: O(n), radius와 무관하게 일정 속도
+            dist = scipy.ndimage.distance_transform_edt(~binary)
+            expanded = dist <= radius
+
+            # 기존 마스크 값 유지, 팽창 영역은 1.0
+            result = np.where(binary, cropped_np, expanded.astype(np.float64))
+
+            out = m.clone()
+            out[cy1:cy2, cx1:cx2] = torch.from_numpy(result.astype(cropped_np.dtype))
+            out_masks.append(out.unsqueeze(0))
 
         return (torch.cat(out_masks, dim=0),)

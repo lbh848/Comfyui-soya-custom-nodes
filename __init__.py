@@ -17,6 +17,18 @@ from .split_person_segment import SplitPersonSegment_mdsoya
 from .join_strings import JoinStringBatch_mdsoya
 from .florence2_caption_filter import Florence2CaptionFilter_mdsoya
 from .zip_strings import ZipStringBatch_mdsoya
+from .filter_closed_eyes import FilterClosedEyes_mdsoya
+from .conditional_lora_loader import ConditionalLoraLoader_mdsoya
+from .expression_tag_extractor import ExpressionTagExtractor_mdsoya
+from .expression_tag_integrator import ExpressionTagIntegrator_mdsoya
+from .segs_scale_by import SegsScaleBy_mdsoya
+from .segs_area import SegsAreaInfo_mdsoya
+from .conditional_image_segs_switch import ConditionalImageSegsSwitch_mdsoya
+from .detailer_distributor_starter import DetailerDistributorStarter_mdsoya
+from .detailer_distributor_pipe import DetailerDistributorPipe_mdsoya
+from .segs_visualize import SegsVisualize_mdsoya
+from .mask_and_segs_bbox import MaskAndSegsBBox_mdsoya
+from .segs_label_transfer import SegsLabelTransfer_mdsoya
 
 NODE_CLASS_MAPPINGS = {
     "SortBatchBySegsBBox_mdsoya": SortBatchBySegsBBox_mdsoya,
@@ -41,6 +53,18 @@ NODE_CLASS_MAPPINGS = {
     "JoinStringBatch_mdsoya": JoinStringBatch_mdsoya,
     "Florence2CaptionFilter_mdsoya": Florence2CaptionFilter_mdsoya,
     "ZipStringBatch_mdsoya": ZipStringBatch_mdsoya,
+    "FilterClosedEyes_mdsoya": FilterClosedEyes_mdsoya,
+    "ConditionalLoraLoader_mdsoya": ConditionalLoraLoader_mdsoya,
+    "ExpressionTagExtractor_mdsoya": ExpressionTagExtractor_mdsoya,
+    "ExpressionTagIntegrator_mdsoya": ExpressionTagIntegrator_mdsoya,
+    "SegsScaleBy_mdsoya": SegsScaleBy_mdsoya,
+    "SegsAreaInfo_mdsoya": SegsAreaInfo_mdsoya,
+    "ConditionalImageSegsSwitch_mdsoya": ConditionalImageSegsSwitch_mdsoya,
+    "DetailerDistributorStarter_mdsoya": DetailerDistributorStarter_mdsoya,
+    "DetailerDistributorPipe_mdsoya": DetailerDistributorPipe_mdsoya,
+    "SegsVisualize_mdsoya": SegsVisualize_mdsoya,
+    "MaskAndSegsBBox_mdsoya": MaskAndSegsBBox_mdsoya,
+    "SegsLabelTransfer_mdsoya": SegsLabelTransfer_mdsoya,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -66,6 +90,18 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "JoinStringBatch_mdsoya": "Join String Batch (Soya)",
     "Florence2CaptionFilter_mdsoya": "Florence2 Caption Filter (Soya)",
     "ZipStringBatch_mdsoya": "Zip String Batch (Soya)",
+    "FilterClosedEyes_mdsoya": "Filter Closed Eyes (Soya)",
+    "ConditionalLoraLoader_mdsoya": "Conditional LoRA Loader (Soya)",
+    "ExpressionTagExtractor_mdsoya": "Expression Tag Extractor (Soya)",
+    "ExpressionTagIntegrator_mdsoya": "Expression Tag Integrator (Soya)",
+    "SegsScaleBy_mdsoya": "SEGS Scale By (Soya)",
+    "SegsAreaInfo_mdsoya": "SEGS Area Info (Soya)",
+    "ConditionalImageSegsSwitch_mdsoya": "Conditional Image/Segs Switch (Soya)",
+    "DetailerDistributorStarter_mdsoya": "Detailer Distributor Starter (Soya)",
+    "DetailerDistributorPipe_mdsoya": "Detailer Distributor Pipe (Soya)",
+    "SegsVisualize_mdsoya": "SEGS Visualize (Soya)",
+    "MaskAndSegsBBox_mdsoya": "Mask AND Segs BBox (Soya)",
+    "SegsLabelTransfer_mdsoya": "SEGS Label Transfer (Soya)",
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']

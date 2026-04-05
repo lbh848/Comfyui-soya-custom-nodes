@@ -78,22 +78,6 @@ class FilterAndAssignCharacters_mdsoya:
         return result
 
     def filter_and_assign(self, prompt, character_names, clip_vision, reference_image, query_image, normalize, remove_suffix=None):
-        # ── RAW 입력 로깅 ──
-        print(f"[filter_and_assign] RAW character_names type={type(character_names)}, len={len(character_names) if isinstance(character_names, list) else 'N/A'}")
-        if isinstance(character_names, list):
-            for idx, cn in enumerate(character_names):
-                print(f"[filter_and_assign]   character_names[{idx}] = {repr(cn)[:100]}")
-
-        print(f"[filter_and_assign] RAW prompt type={type(prompt)}, value={repr(prompt)}")
-
-        print(f"[filter_and_assign] RAW reference_image type={type(reference_image)}")
-        if isinstance(reference_image, list):
-            print(f"[filter_and_assign]   reference_image list len={len(reference_image)}")
-            for idx, ri in enumerate(reference_image):
-                print(f"[filter_and_assign]   reference_image[{idx}] shape={ri.shape if hasattr(ri, 'shape') else type(ri)}")
-        elif hasattr(reference_image, 'shape'):
-            print(f"[filter_and_assign]   reference_image shape={reference_image.shape}")
-
         # ── unwrap 스칼라 입력 ──
         prompt_text = prompt[0] if isinstance(prompt, list) else prompt
         cv = clip_vision[0] if isinstance(clip_vision, list) else clip_vision
@@ -135,8 +119,6 @@ class FilterAndAssignCharacters_mdsoya:
         N_total = ref_img.shape[0]
         M = query_img.shape[0]
 
-        print(f"[filter_and_assign] parsed names_list={names_list}, N_total(ref images)={N_total}, M(query images)={M}")
-
         # ── Step 1: prompt 필터링 ──
         # prompt에 언급된 character_names만 사용. prompt가 비어있으면 전체 사용.
         def preprocess(text):
@@ -144,39 +126,35 @@ class FilterAndAssignCharacters_mdsoya:
 
         if prompt_text and prompt_text.strip():
             prompt_lower = preprocess(prompt_text)
-            print(f"[filter_and_assign] prompt_lower={repr(prompt_lower[:300])}")
-            for i, name in enumerate(names_list):
-                name_pp = preprocess(name)
-                in_prompt = name_pp in prompt_lower
-                in_range = i < N_total
-                print(f"[filter_and_assign]   name[{i}]={repr(name)} pp={repr(name_pp)} in_prompt={in_prompt} i<{N_total}={in_range}")
             matched_indices = [
                 i for i, name in enumerate(names_list)
                 if i < N_total and preprocess(name) in prompt_lower
             ]
 
+            # 중복 이름 제거: 동일한 이름이 여러 인덱스에 있으면 첫 번째만 유지
+            seen_names = set()
+            deduped_indices = []
+            for i in matched_indices:
+                name_key = preprocess(names_list[i])
+                if name_key not in seen_names:
+                    seen_names.add(name_key)
+                    deduped_indices.append(i)
             if matched_indices:
                 names_list = [names_list[i] for i in matched_indices]
                 ref_img = ref_img[matched_indices]
-                print(f"[filter_and_assign] Prompt matched: indices={matched_indices}, names={names_list}")
             else:
-                # prompt에 매칭되는 캐릭터가 하나도 없으면 빈 결과 반환
-                print(f"[filter_and_assign] No character matched in prompt, returning empty")
                 return ([], [])
         else:
-            print(f"[filter_and_assign] No prompt, using all {N_total} characters")
+            pass
 
         N = ref_img.shape[0]
 
         if N == 0 or M == 0:
-            print(f"[filter_and_assign] Skipping: N={N}, M={M}")
             return ([], [])
 
         # ── Step 2: 이미지 정규화 ──
         ref_img = self._normalize_images(ref_img, norm_mode)
         query_img = self._normalize_images(query_img, norm_mode)
-
-        print(f"[filter_and_assign] ref={ref_img.shape}, query={query_img.shape}, normalize={norm_mode}")
 
         # ── Step 3: CLIP Vision 인코딩 (center crop 고정) ──
         ref_output = cv.encode_image(ref_img, crop=True)
@@ -196,24 +174,17 @@ class FilterAndAssignCharacters_mdsoya:
         # ── Step 4: cosine similarity + Hungarian assignment ──
         sim_matrix = F.cosine_similarity(query_embeds.unsqueeze(1), ref_embeds.unsqueeze(0), dim=2)
 
-        # M > N인 경우: ref를 반복하여 고르게 분배
-        K = math.ceil(M / N) if N > 0 else 1
-        if K > 1:
-            sim_expanded = sim_matrix.repeat(1, K)
-        else:
-            sim_expanded = sim_matrix
+        # Hungarian 알고리즘: M > N이면 패딩 컬럼(cost=0)이 추가되어
+        # 가장 유사도가 낮은 query는 패딩 컬럼에 배정됨 → "unknown" 처리
+        row_ind, col_ind = linear_sum_assignment(-sim_matrix.cpu().numpy())
 
-        row_ind, col_ind = linear_sum_assignment(-sim_expanded.cpu().numpy())
-        matched_ref_indices = col_ind % N
-
-        # query 순서 보존
-        final_names = [None] * M
+        # query 순서 보존, 미배정 query는 "unknown"
+        final_names = ["unknown"] * M
         final_scores = [0.0] * M
 
-        for idx, (r, c) in enumerate(zip(row_ind, matched_ref_indices)):
-            final_names[r] = names_list[c]
-            final_scores[r] = float(sim_matrix[r, c].item())
-
-        print(f"[filter_and_assign] results: {list(zip(final_names, [round(s, 4) for s in final_scores]))}")
+        for r, c in zip(row_ind, col_ind):
+            if c < N:
+                final_names[r] = names_list[c]
+                final_scores[r] = float(sim_matrix[r, c].item())
 
         return (final_names, final_scores)
