@@ -1,0 +1,1162 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Soya Scheduler</title>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1a1a2e;color:#e0e0e0;font-family:'Segoe UI',sans-serif;padding:20px}
+h1{color:#e94560;margin-bottom:20px;font-size:1.5em}
+.tabs{display:flex;gap:4px;margin-bottom:20px}
+.tab-btn{background:#2d2d44;border:none;color:#aaa;padding:10px 20px;cursor:pointer;border-radius:6px 6px 0 0;font-size:14px;transition:.2s}
+.tab-btn:hover{background:#3d3d5c;color:#fff}
+.tab-btn.active{background:#3d3d5c;color:#e94560;font-weight:bold}
+.panel{background:#202040;border-radius:0 8px 8px 8px;padding:20px;min-height:400px}
+.btn{background:#e94560;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;transition:.2s}
+.btn:hover{background:#c73652}
+.btn-sm{padding:4px 10px;font-size:12px}
+.btn-danger{background:#6b2121}.btn-danger:hover{background:#8b3131}
+.btn-secondary{background:#444}.btn-secondary:hover{background:#666}
+
+/* Cards */
+.card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
+.card{background:#2d2d44;border-radius:8px;padding:16px;position:relative}
+.card img{width:100%;max-height:250px;object-fit:contain;border-radius:6px;margin-bottom:10px;background:#333}
+.card h3{color:#e94560;margin-bottom:6px}
+.card fieldset{border:1px solid #444;border-radius:4px;padding:8px;margin-bottom:8px}
+.card legend{font-size:12px;color:#888;padding:0 4px}
+.card label{display:block;font-size:12px;color:#aaa;margin-bottom:4px}
+.card input,.card textarea,.card select{width:100%;background:#1a1a2e;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:6px 8px;font-size:13px;margin-bottom:6px}
+.card textarea{min-height:60px;resize:vertical}
+.card .actions{display:flex;gap:6px;margin-top:8px}
+
+/* Form */
+.form-section{margin-bottom:20px}
+.form-section label{display:block;font-size:13px;color:#aaa;margin-bottom:4px;margin-top:10px}
+.form-section input,.form-section textarea,.form-section select{width:100%;max-width:600px;background:#1a1a2e;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:8px;font-size:13px}
+.form-section textarea{min-height:80px;resize:vertical}
+.form-section .row{display:flex;gap:12px;align-items:end}
+.form-section .row>div{flex:1}
+
+/* Process result */
+.result-section{margin-bottom:16px}
+.result-section h3{color:#e94560;margin-bottom:8px;font-size:14px}
+.face-grid{display:flex;gap:12px;flex-wrap:wrap}
+.face-item{background:#2d2d44;border-radius:6px;padding:10px;text-align:center;min-width:140px}
+.face-item img{width:120px;height:120px;object-fit:cover;border-radius:4px}
+.face-item .label{font-size:12px;color:#aaa;margin-top:4px}
+.face-item .score{font-size:11px;color:#888}
+.face-item .face-pair{display:flex;gap:8px;justify-content:center}
+.face-item .face-pair>div{text-align:center}
+.face-item .face-pair .sub-label{font-size:10px;color:#666;margin-top:2px}
+
+.prompt-box{background:#2d2d44;border-radius:6px;padding:16px;font-family:monospace;white-space:pre-wrap;font-size:13px;position:relative}
+.copy-btn{position:absolute;top:8px;right:8px}
+
+/* Timing table */
+table{width:100%;max-width:400px;border-collapse:collapse}
+th,td{text-align:left;padding:6px 12px;border-bottom:1px solid #333;font-size:13px}
+th{color:#888;font-weight:normal}
+
+/* Drop zone */
+.drop-zone{border:2px dashed #555;border-radius:8px;padding:30px;text-align:center;cursor:pointer;transition:.2s;color:#888;font-size:14px}
+.drop-zone:hover{border-color:#e94560;color:#e94560}
+.drop-zone.dragover{border-color:#e94560;background:rgba(233,69,96,0.1)}
+
+/* New character form */
+.new-card{background:#2d2d44;border-radius:8px;padding:16px;border:2px dashed #555}
+.new-card h3{color:#aaa;margin-bottom:10px}
+.new-card label{display:block;font-size:12px;color:#aaa;margin-bottom:4px}
+.new-card input,.new-card textarea,.new-card select{width:100%;background:#1a1a2e;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:6px 8px;font-size:13px;margin-bottom:6px}
+.new-card textarea{min-height:60px;resize:vertical}
+
+/* Top bar */
+.top-bar{display:flex;gap:8px;margin-bottom:16px;align-items:center}
+.unknown-badge{background:#444;color:#e94560;font-size:11px;padding:2px 6px;border-radius:3px}
+
+/* Level badges */
+.level-badge{display:inline-block;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:bold}
+.level-0{background:#4ecdc4;color:#1a1a2e}
+.level-1{background:#f9a825;color:#1a1a2e}
+.level-2{background:#e94560;color:#fff}
+
+/* Debug tables */
+.debug-table{width:100%;max-width:800px;border-collapse:collapse}
+.debug-table th,.debug-table td{text-align:left;padding:6px 10px;border-bottom:1px solid #333;font-size:12px}
+.debug-table th{color:#888;font-weight:normal;white-space:nowrap}
+.debug-table td{color:#e0e0e0}
+
+/* Collapsible */
+.collapse-header{cursor:pointer;user-select:none;display:flex;align-items:center;gap:6px}
+.collapse-header:hover{color:#fff}
+.collapse-arrow{transition:transform .2s;display:inline-block}
+.collapse-arrow.open{transform:rotate(90deg)}
+</style>
+</head>
+<body>
+<div id="app">
+<h1>Soya Scheduler</h1>
+<div class="tabs">
+  <button class="tab-btn" :class="{active:tab===1}" @click="tab=1">Characters</button>
+  <button class="tab-btn" :class="{active:tab===2}" @click="tab=2">Settings</button>
+  <button class="tab-btn" :class="{active:tab===3}" @click="tab=3">Process Result</button>
+  <button class="tab-btn" :class="{active:tab===4}" @click="tab=4">Final Prompts</button>
+</div>
+
+<!-- Tab 1: Characters -->
+<div class="panel" v-if="tab===1">
+  <div class="top-bar">
+    <button class="btn btn-sm" @click="reloadChars">Reload</button>
+    <span v-if="reloadMsg" style="color:#4ecdc4;font-size:13px">{{reloadMsg}}</span>
+  </div>
+  <div class="card-grid">
+    <div class="card" v-for="ch in characters" :key="ch.name">
+      <img v-if="ch.image_file && !ch.is_unknown" :src="'/soya_scheduler/api/characters/'+encodeURIComponent(ch.name)+'/image'" @error="$event.target.style.display='none'">
+      <div v-if="ch.is_unknown" style="text-align:center;padding:20px;color:#888;border:1px dashed #555;border-radius:6px;margin-bottom:10px">
+        Unknown <span class="unknown-badge">always present</span>
+      </div>
+      <div v-else-if="!ch.image_file" style="text-align:center;padding:20px;color:#888;border:1px dashed #555;border-radius:6px;margin-bottom:10px">
+        No image
+      </div>
+      <div v-if="editing===ch.name">
+        <fieldset><legend>Edit Character</legend>
+          <label>Name</label>
+          <input v-model="editForm.name" :disabled="ch.is_unknown">
+          <label>Gender</label>
+          <select v-model="editForm.gender"><option value="girl">girl</option><option value="boy">boy</option></select>
+          <label>Eye Prompt</label>
+          <textarea v-model="editForm.eye_prompt"></textarea>
+          <div class="actions">
+            <button class="btn btn-sm" @click="saveChar(ch)">Save</button>
+            <button class="btn btn-sm btn-secondary" @click="editing=null">Cancel</button>
+          </div>
+        </fieldset>
+      </div>
+      <div v-else>
+        <h3>{{ch.name}} <!-- <span v-if="ch.has_faceid_embed" title="FaceID embedding generated" style="color:#4ecdc4;font-size:14px;vertical-align:middle">&#9679;</span> --></h3>
+        <p style="font-size:12px;color:#888">Gender: {{ch.gender}}</p>
+        <p style="font-size:12px;margin-top:4px">{{ch.eye_prompt || '(empty)'}}</p>
+        <div class="actions">
+          <button class="btn btn-sm" @click="startEdit(ch)">Edit</button>
+          <button v-if="!ch.is_unknown && ch.image_file" class="btn btn-sm btn-secondary" @click="triggerUpload(ch.name)">Change Image</button>
+          <button v-if="!ch.is_unknown" class="btn btn-sm btn-danger" @click="deleteChar(ch.name)">Delete</button>
+          <!-- [FaceID disabled - low performance]
+          <button v-if="!ch.is_unknown && ch.image_file" class="btn btn-sm" :style="{background: ch.has_faceid_embed ? '#2a7a5a' : '#2a7a5a'}" @click="generateFaceidEmbed(ch.name)" :disabled="faceidGenerating===ch.name">{{faceidGenerating===ch.name?'Generating...':ch.has_faceid_embed?'Regen FaceID':'Gen FaceID'}}</button>
+          -->
+        </div>
+      </div>
+    </div>
+    <!-- New character -->
+    <div class="new-card">
+      <h3>+ New Character</h3>
+      <div class="drop-zone" @dragover.prevent="$event.dataTransfer.dropEffect='copy'" @drop.prevent="handleNewCharDrop" :class="{dragover:newChar.dragover}" @dragenter.prevent="newChar.dragover=true" @dragleave="newChar.dragover=false">
+        <img v-if="newChar.preview" :src="newChar.preview" style="width:100%;max-height:150px;object-fit:cover;border-radius:6px">
+        <template v-else>Drop image here or click to select</template>
+        <input type="file" id="new-char-file" style="display:none" accept="image/*" @change="handleNewCharFileSelect">
+      </div>
+      <div style="margin-top:4px;cursor:pointer;font-size:11px;color:#888" @click="document.getElementById('new-char-file').click()" v-if="!newChar.preview">Select file...</div>
+      <div v-if="newChar.preview" style="font-size:11px;color:#888;margin-top:4px;cursor:pointer" @click="clearNewCharFile">Remove</div>
+      <label style="margin-top:8px">Name</label>
+      <input v-model="newChar.name" placeholder="e.g. stella">
+      <label>Gender</label>
+      <select v-model="newChar.gender"><option value="girl">girl</option><option value="boy">boy</option></select>
+      <label>Eye Prompt</label>
+      <textarea v-model="newChar.eye_prompt" placeholder="e.g. blue eyes, long hair"></textarea>
+      <div class="actions" style="margin-top:8px">
+        <button class="btn btn-sm" @click="addChar">Add Character</button>
+      </div>
+    </div>
+  </div>
+  <!-- Hidden file inputs for image change -->
+  <input type="file" v-for="ch in characters" :key="'fi-'+ch.name" :id="'file-'+ch.name" style="display:none" accept="image/*" @change="uploadImage(ch.name,$event)">
+</div>
+
+<!-- Tab 2: Settings -->
+<div class="panel" v-if="tab===2">
+  <div class="form-section">
+    <h3 style="color:#e94560;margin-bottom:12px">Path</h3>
+    <label>Base Path (Image Folder)</label>
+    <input v-model="settings.base_path" placeholder="e.g. E:\images\characters">
+  </div>
+  <div class="form-section">
+    <h3 style="color:#e94560;margin-bottom:12px">Prompt Settings</h3>
+    <label>Male Enhance Prompt</label>
+    <textarea v-model="settings.male_enhance_prompt"></textarea>
+    <label>Female Enhance Prompt</label>
+    <textarea v-model="settings.female_enhance_prompt"></textarea>
+    <label>Common Prompt</label>
+    <textarea v-model="settings.common_prompt"></textarea>
+  </div>
+  <div class="form-section">
+    <h3 style="color:#e94560;margin-bottom:12px">Model & Device</h3>
+    <div class="row">
+      <div>
+        <label>BBox Model</label>
+        <select v-model="settings.bbox_model">
+          <option v-for="m in bboxModels" :key="m" :value="m">{{m}}</option>
+        </select>
+      </div>
+      <div>
+        <label>CLIP Vision Model</label>
+        <select v-model="settings.clip_vision_model">
+          <option v-for="m in clipModels" :key="m" :value="m">{{m}}</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>BBox Device</label>
+        <select v-model="settings.bbox_device">
+          <option v-for="d in devices" :key="d" :value="d">{{d}}</option>
+        </select>
+      </div>
+      <div>
+        <label>CLIP Device</label>
+        <select v-model="settings.clip_device">
+          <option v-for="d in devices" :key="d" :value="d">{{d}}</option>
+        </select>
+      </div>
+    </div>
+    <label>BBox Threshold</label>
+    <input type="number" v-model.number="settings.bbox_threshold" step="0.05" min="0" max="1">
+    <label>Face Crop Factor</label>
+    <input type="number" v-model.number="settings.face_crop_factor" step="0.5" min="1" max="10">
+    <label>Ref Face Crop Factor</label>
+    <input type="number" v-model.number="settings.ref_face_crop_factor" step="0.5" min="1" max="10">
+    <label>Max Faces (legacy)</label>
+    <input type="number" v-model.number="settings.max_faces" step="1" min="1" max="10">
+    <label>CPU Cores (num_cpus)</label>
+    <input type="number" v-model.number="settings.num_cpus" step="1" min="1" max="32">
+  </div>
+
+  <!-- New: Face Tracking & Level Settings -->
+  <div class="form-section">
+    <h3 style="color:#e94560;margin-bottom:12px">Face Tracking & Crop</h3>
+    <div class="row">
+      <div>
+        <label>Tracking Face Count</label>
+        <input type="number" v-model.number="settings.tracking_face_count" step="1" min="1" max="20">
+      </div>
+      <div>
+        <label>Keep Face Count</label>
+        <div class="row" style="gap:8px;align-items:center">
+          <input type="number" v-model.number="settings.keep_face_count" step="1" min="1" max="20"
+            :disabled="settings.keep_matched_only" style="flex:1">
+          <label style="display:flex;align-items:center;gap:4px;margin:0;white-space:nowrap;cursor:pointer">
+            <input type="checkbox" v-model="settings.keep_matched_only"> Matched only
+          </label>
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Target Size (px)</label>
+        <input type="number" v-model.number="settings.target_size" step="64" min="128" max="2048">
+      </div>
+      <div>
+        <label>Detailer Face Crop Factor</label>
+        <input type="number" v-model.number="settings.detailer_face_crop_factor" step="0.5" min="1" max="10">
+      </div>
+    </div>
+    <label>SEGS Min Distance (px)</label>
+    <input type="number" v-model.number="settings.segs_min_distance" step="1" min="0" max="200">
+    <p style="font-size:11px;color:#888;margin-top:-4px;margin-bottom:8px">Trim mode: minimum distance from SEGS bbox to crop edge. 0 = disabled (pad mode, use detailer crop factor).</p>
+    <label>Crop Mode</label>
+    <select v-model="settings.crop_mode">
+      <option value="preserve">Preserve (minimize crop)</option>
+      <option value="maximize_segment_ratio">Maximize Segment Ratio</option>
+    </select>
+    <p style="font-size:11px;color:#888;margin-top:-4px;margin-bottom:8px">
+      <b>Preserve</b>: larger crop with generous padding, keeps more context around the face.<br>
+      <b>Maximize Segment Ratio</b>: tight rectangular crop around bbox, segment fills more of the crop area. Uses SEGS min distance as minimum margin.
+    </p>
+  </div>
+
+  <!-- New: Upscale Settings -->
+  <div class="form-section">
+    <h3 style="color:#e94560;margin-bottom:12px">Upscale</h3>
+    <div class="row">
+      <div>
+        <label>Preprocess Upscale</label>
+        <select v-model="settings.preprocess_upscale">
+          <option :value="false">OFF</option>
+          <option :value="true">ON</option>
+        </select>
+      </div>
+      <div>
+        <label>Upscale Device</label>
+        <select v-model="settings.upscale_device">
+          <option v-for="d in devices" :key="d" :value="d">{{d}}</option>
+        </select>
+      </div>
+    </div>
+    <label>Upscale Model</label>
+    <select v-model="settings.upscale_model">
+      <option value="">(none)</option>
+      <option v-for="m in upscaleModels" :key="m" :value="m">{{m}}</option>
+    </select>
+  </div>
+
+  <!-- New: Segment Settings -->
+  <div class="form-section">
+    <h3 style="color:#e94560;margin-bottom:12px">Segmentation</h3>
+    <div class="row">
+      <div>
+        <label>Segment Method</label>
+        <select v-model="settings.segment_method">
+          <option value="sam2">SAM2 + GroundingDINO</option>
+          <option value="custom">Custom Eye Seg (ISNet)</option>
+        </select>
+      </div>
+      <div>
+        <label>Segment Device</label>
+        <select v-model="settings.segment_device">
+          <option v-for="d in devices" :key="d" :value="d">{{d}}</option>
+        </select>
+      </div>
+    </div>
+    <!-- SAM2 + GroundingDINO settings -->
+    <template v-if="settings.segment_method === 'sam2'">
+      <div class="row">
+        <div>
+          <label>SAM2 Model</label>
+          <select v-model="settings.sam2_model">
+            <option value="">(none)</option>
+            <option v-for="m in sam2Models" :key="m" :value="m">{{m}}</option>
+          </select>
+        </div>
+        <div>
+          <label>GroundingDINO Model</label>
+          <select v-model="settings.grounding_dino_model">
+            <option value="">(none)</option>
+            <option v-for="m in dinoModels" :key="m" :value="m">{{m}}</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Segment Threshold</label>
+          <input type="number" v-model.number="settings.segment_threshold" step="0.05" min="0.05" max="1">
+        </div>
+        <div>
+          <label>Segment Prompt</label>
+          <input v-model="settings.segment_prompt" placeholder="e.g. eyes">
+        </div>
+      </div>
+    </template>
+    <!-- Custom Eye Seg settings -->
+    <template v-if="settings.segment_method === 'custom'">
+      <div class="row">
+        <div>
+          <label>Eye Seg Model</label>
+          <select v-model="settings.eye_seg_model">
+            <option value="">(none)</option>
+            <option v-for="m in soyaSegModels" :key="m" :value="m">{{m}}</option>
+          </select>
+        </div>
+        <div>
+          <label>Eye Seg Threshold</label>
+          <input type="number" v-model.number="settings.eye_seg_threshold" step="0.05" min="0.05" max="1">
+        </div>
+      </div>
+      <p style="font-size:11px;color:#888">
+        Custom ISNet model for eye segmentation. Requires face-cropped images. Place checkpoints in <b>models/soya_seg/</b>
+      </p>
+    </template>
+  </div>
+
+  <!-- Mask -->
+  <div class="form-section">
+    <h3 style="color:#e94560;margin-bottom:12px">Mask</h3>
+    <label>Mask Sigma Factor</label>
+    <input type="number" v-model.number="settings.mask_sigma_factor" step="0.05" min="0" max="2">
+    <p style="font-size:11px;color:#888;margin-top:-4px;margin-bottom:8px">
+      0 = hard edge, higher = softer gaussian falloff at mask edges
+    </p>
+  </div>
+
+  <!-- Eyebrow Subtraction -->
+  <div class="form-section">
+    <h3 style="color:#e94560;margin-bottom:12px">Eyebrow (ISNet)</h3>
+    <div class="row">
+      <div>
+        <label>Eyebrow Model</label>
+        <select v-model="settings.eyebrow_model">
+          <option value="">(none)</option>
+          <option v-for="m in eyebrowModels" :key="m" :value="m">{{m}}</option>
+        </select>
+      </div>
+      <div>
+        <label>Eyebrow Mode</label>
+        <select v-model="settings.eyebrow_mode">
+          <option value="off">OFF</option>
+          <option value="subtract">Subtract</option>
+          <option value="restore_color">Restore Color</option>
+        </select>
+      </div>
+    </div>
+    <label>Eyebrow Threshold</label>
+    <input type="number" v-model.number="settings.eyebrow_threshold" step="0.05" min="0.05" max="1">
+    <div>
+      <label>Closed Eye Threshold</label>
+      <input type="number" v-model.number="settings.closed_eye_threshold" step="0.05" min="0" max="1">
+    </div>
+    <p style="font-size:11px;color:#888">
+      <b>Subtract</b>: Remove eyebrow area from mask entirely (no detailer processing on eyebrows).<br>
+      <b>Restore Color</b>: Detailer processes eyebrows, then restores original eyebrow colors while keeping improved shape. Place checkpoint in <b>models/soya_seg/</b><br>
+      <b>Closed Eye Threshold</b>: If eyebrow & segment mask overlap &ge; this ratio, eyes are considered closed and detailing is skipped for that face. Set 0 to disable.
+    </p>
+  </div>
+
+  <!-- Eyebrow Patch (Detailer) -->
+  <div class="form-section">
+    <h3 style="color:#e94560;margin-bottom:12px">Eyebrow Patch (Detailer)</h3>
+    <div class="row">
+      <div>
+        <label>Restore</label>
+        <select v-model="settings.eyebrow_restore">
+          <option :value="false">OFF</option>
+          <option :value="true">ON</option>
+        </select>
+      </div>
+      <div>
+        <label>Restore Mode</label>
+        <select v-model="settings.eyebrow_restore_mode">
+          <option value="hs_preserve">HS Preserve</option>
+          <option value="hsv_restore">HSV Restore</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Blur (HSV Restore only)</label>
+        <input type="number" v-model.number="settings.eyebrow_blur" step="1" min="0" max="100">
+      </div>
+      <div>
+        <label>HS Percentile (HSV Restore only)</label>
+        <input type="number" v-model.number="settings.eyebrow_hs_percentile" step="0.05" min="0" max="1">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>V Range (HSV Restore only)</label>
+        <input type="number" v-model.number="settings.eyebrow_v_range" step="0.05" min="0" max="1">
+      </div>
+      <div>
+        <label>Opacity</label>
+        <input type="number" v-model.number="settings.eyebrow_opacity" step="0.05" min="0" max="1">
+      </div>
+    </div>
+    <p style="font-size:11px;color:#888">
+      <b>HS Preserve</b>: Enhanced V유지 + 원본 H,S 가져오기 (1:1 픽셀 매핑).<br>
+      <b>HSV Restore</b>: 기존 모드 (blur → percentile → V압축 → 합성). Blur/HS Percentile/V Range는 이 모드에서만 적용.
+    </p>
+  </div>
+
+  <!-- Face Detailer -->
+  <div class="form-section">
+    <h3 style="color:#e94560;margin-bottom:12px">Face Detailer</h3>
+    <div class="row">
+      <div>
+        <label>Enabled</label>
+        <select v-model="settings.face_detailer_enabled">
+          <option :value="false">OFF</option>
+          <option :value="true">ON</option>
+        </select>
+      </div>
+      <div>
+        <label>Surrounding Mode</label>
+        <select v-model="settings.face_surrounding_mode">
+          <option value="bbox_scale">BBox Scale</option>
+          <option value="pixel">Pixel Padding</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>BBox Scale Factor</label>
+        <input type="number" v-model.number="settings.face_bbox_scale_factor" step="0.1" min="1.0" max="5.0">
+      </div>
+      <div>
+        <label>Pixel Padding</label>
+        <input type="number" v-model.number="settings.face_surrounding_pixels" step="8" min="0" max="512">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Face Upscale Model</label>
+        <select v-model="settings.face_upscale_model">
+          <option value="">(none)</option>
+          <option v-for="m in upscaleModels" :key="m" :value="m">{{m}}</option>
+        </select>
+      </div>
+      <div>
+        <label>Face Upscale Device</label>
+        <select v-model="settings.face_upscale_device">
+          <option v-for="d in devices" :key="d" :value="d">{{d}}</option>
+        </select>
+      </div>
+    </div>
+    <p style="font-size:11px;color:#888">
+      Eye Detailer 앞에 Face Detailer 단계를 추가합니다.<br>
+      <b>BBox Scale</b>: bbox 크기 × 배율로 crop 영역 계산.<br>
+      <b>Pixel Padding</b>: bbox 각 면에 지정 px만큼 추가.
+    </p>
+  </div>
+
+  <!-- Face Data Collection -->
+  <div class="form-section">
+    <h3 style="color:#e94560;margin-bottom:12px">Face Data Collection</h3>
+    <div class="row">
+      <div>
+        <label>Save Face Crops</label>
+        <select v-model="settings.save_face_data">
+          <option :value="false">OFF</option>
+          <option :value="true">ON</option>
+        </select>
+      </div>
+      <div>
+        <label>Output Subfolder</label>
+        <input type="text" v-model="settings.face_data_path" placeholder="face_data">
+      </div>
+    </div>
+    <p style="font-size:11px;color:#888">
+      Before Postprocess 단계의 잘린 얼굴 이미지를 ComfyUI output 폴더 내 하위 폴더에 저장합니다.<br>
+      실행 시각 기준 하위 폴더가 생성되며, 파일명은 <b>라벨_캐릭터명.png</b> 형식입니다.
+    </p>
+  </div>
+
+  <!-- [FaceID disabled - low performance]
+  <div class="form-section">
+    <h3 style="color:#e94560;margin-bottom:12px">FaceID Plus V2</h3>
+    <div class="row">
+      <div>
+        <label>IPAdapter CLIP Vision</label>
+        <select v-model="settings.faceid_clip_vision_model">
+          <option value="">(same as CLIP Vision Model)</option>
+          <option v-for="m in clipModels" :key="m" :value="m">{{m}}</option>
+        </select>
+      </div>
+      <div>
+        <label>IPAdapter Model</label>
+        <select v-model="settings.faceid_ipadapter_file">
+          <option value="">(auto-detect)</option>
+          <option v-for="m in ipadapterModels" :key="m" :value="m">{{m}}</option>
+        </select>
+      </div>
+      <div>
+        <label>LoRA Strength</label>
+        <input type="number" v-model.number="settings.faceid_lora_strength" step="0.05" min="0" max="2">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Weight</label>
+        <input type="number" v-model.number="settings.faceid_weight" step="0.05" min="0" max="3">
+      </div>
+      <div>
+        <label>Weight FaceID V2</label>
+        <input type="number" v-model.number="settings.faceid_weight_faceidv2" step="0.05" min="0" max="5">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Start At</label>
+        <input type="number" v-model.number="settings.faceid_start_at" step="0.05" min="0" max="1">
+      </div>
+      <div>
+        <label>End At</label>
+        <input type="number" v-model.number="settings.faceid_end_at" step="0.05" min="0" max="1">
+      </div>
+    </div>
+    <label>Embeds Scaling</label>
+    <select v-model="settings.faceid_embeds_scaling">
+      <option value="V only">V only</option>
+      <option value="K+V">K+V</option>
+      <option value="K+V+Biased">K+V+Biased</option>
+    </select>
+    <label>Mask Sigma Factor</label>
+    <input type="number" v-model.number="settings.faceid_mask_sigma_factor" step="0.05" min="0.05" max="2.0">
+    <p style="font-size:11px;color:#888;margin-top:-4px;margin-bottom:8px">Gaussian falloff for attention masks. Lower = tighter mask per face (less mixing with multiple people). Default: 0.4</p>
+    <label>Crop Zoom (FaceID CLIP)</label>
+    <input type="number" v-model.number="settings.faceid_crop_zoom" step="0.1" min="1.0" max="3.0">
+    <p style="font-size:11px;color:#888;margin-top:-4px;margin-bottom:8px">Zoom into face crop center before CLIP encoding. Removes hair/forehead area. 1.0 = no zoom, 1.3~1.5 = removes bangs. <b>Requires regenerating FaceID embeds after change.</b></p>
+  </div>
+  -->
+
+  <button class="btn" @click="saveSettings" style="margin-top:10px">Save Settings</button>
+  <span v-if="savedMsg" style="color:#4ecdc4;margin-left:12px">{{savedMsg}}</span>
+
+  <!-- VRAM Usage -->
+  <div class="form-section" style="margin-top:20px">
+    <h3 style="color:#e94560;margin-bottom:12px">Memory Usage <button class="btn btn-sm" @click="toggleVramPoll">{{vramPolling?'Stop':'Auto Refresh'}}</button></h3>
+    <!-- RAM -->
+    <div v-if="vramData.ram && vramData.ram.total_mb" style="margin-bottom:12px">
+      <div style="font-size:13px;color:#aaa;margin-bottom:4px">System RAM</div>
+      <div style="background:#1a1a2e;border-radius:4px;height:20px;position:relative;overflow:hidden">
+        <div :style="{width:vramData.ram.percent+'%',background:'#4ecdc4',height:'100%',borderRadius:'4px',transition:'width 0.3s'}"></div>
+        <span style="position:absolute;top:2px;left:8px;font-size:11px;color:#fff">{{vramData.ram.used_mb.toFixed(0)}} / {{vramData.ram.total_mb.toFixed(0)}} MB ({{vramData.ram.percent.toFixed(1)}}%)</span>
+      </div>
+    </div>
+    <!-- VRAM per GPU -->
+    <div v-if="vramData.gpus.length">
+      <div v-for="gpu in vramData.gpus" :key="gpu.index" style="margin-bottom:12px">
+        <div style="font-size:13px;color:#aaa;margin-bottom:4px">GPU {{gpu.index}} – {{gpu.name}}</div>
+        <div style="background:#1a1a2e;border-radius:4px;height:20px;position:relative;overflow:hidden">
+          <div :style="{width:(gpu.used_mb/gpu.total_mb*100)+'%',background:'#e94560',height:'100%',borderRadius:'4px',transition:'width 0.3s'}"></div>
+          <span style="position:absolute;top:2px;left:8px;font-size:11px;color:#fff">{{gpu.used_mb.toFixed(0)}} / {{gpu.total_mb.toFixed(0)}} MB ({{(gpu.used_mb/gpu.total_mb*100).toFixed(1)}}%)</span>
+        </div>
+        <div v-if="procsForGpu(gpu.index).length" style="margin-top:4px">
+          <div v-for="p in procsForGpu(gpu.index)" :key="p.pid" style="font-size:11px;color:#888;padding-left:12px">
+            PID {{p.pid}} ({{p.name}}) – {{p.used_mb.toFixed(0)}} MB
+          </div>
+        </div>
+      </div>
+    </div>
+    <div v-else style="color:#888;font-size:13px">No GPU data available</div>
+  </div>
+</div>
+
+<!-- Tab 3: Process Result (Enhanced Debug) -->
+<div class="panel" v-if="tab===3">
+  <div v-if="processResult">
+    <!-- Timing -->
+    <div class="result-section" v-if="processResult.timing">
+      <h3>Timing</h3>
+      <table>
+        <tr><th>Step</th><th>Duration</th><th>VRAM Peak</th></tr>
+        <tr>
+          <td style="color:#e94560"><b>Preprocess</b></td>
+          <td>{{processResult.timing.preprocess.toFixed(3)}}s</td>
+          <td>{{(processResult.timing.preprocess_vram||0).toFixed(2)}}GB</td>
+        </tr>
+        <tr v-if="processResult.timing.preprocess_upscale != null">
+          <td style="padding-left:16px">Upscale</td>
+          <td>{{processResult.timing.preprocess_upscale.toFixed(3)}}s</td>
+          <td></td>
+        </tr>
+        <tr v-if="processResult.timing.preprocess_face_detect != null">
+          <td style="padding-left:16px">Face Detection</td>
+          <td>{{processResult.timing.preprocess_face_detect.toFixed(3)}}s</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td style="color:#e94560"><b>Parallel</b></td>
+          <td>{{processResult.timing.parallel.toFixed(3)}}s</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td style="padding-left:16px">Subprocess</td>
+          <td>{{processResult.timing.subprocess.toFixed(3)}}s</td>
+          <td></td>
+        </tr>
+        <tr v-for="(dur,step) in processResult.timing.subprocess_steps" :key="step">
+          <td style="padding-left:32px">{{step}}</td><td>{{dur.toFixed(3)}}s</td><td></td>
+        </tr>
+        <tr>
+          <td style="padding-left:16px">Main process</td>
+          <td>{{processResult.timing.main_process.toFixed(3)}}s</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td style="color:#e94560"><b>Postprocess</b></td>
+          <td>{{processResult.timing.postprocess.toFixed(3)}}s</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td style="padding-left:16px">Upscale</td>
+          <td>{{processResult.timing.postprocess_upscale.toFixed(3)}}s</td>
+          <td>{{processResult.timing.postprocess_upscale_vram.toFixed(2)}}GB</td>
+        </tr>
+        <tr>
+          <td style="padding-left:16px">Segs</td>
+          <td>{{processResult.timing.postprocess_segs.toFixed(3)}}s</td>
+          <td>{{processResult.timing.postprocess_segs_vram.toFixed(2)}}GB</td>
+        </tr>
+        <tr v-if="processResult.timing.postprocess_eyebrow != null && processResult.timing.postprocess_eyebrow > 0">
+          <td style="padding-left:16px">Eyebrow</td>
+          <td>{{processResult.timing.postprocess_eyebrow.toFixed(3)}}s</td>
+          <td>{{processResult.timing.postprocess_eyebrow_vram.toFixed(2)}}GB</td>
+        </tr>
+        <tr><td><b>Total</b></td><td><b>{{processResult.timing.total.toFixed(3)}}s</b></td><td></td></tr>
+      </table>
+    </div>
+
+    <!-- Detected Faces (legacy view) -->
+    <div class="result-section">
+      <h3 class="collapse-header" @click="collapseDetection=!collapseDetection">
+        <span class="collapse-arrow" :class="{open:collapseDetection}">&#9654;</span>
+        Ray Worker Results ({{processResult.assignments?.length || 0}} faces detected)
+      </h3>
+      <div v-show="collapseDetection">
+        <div class="face-grid" style="margin-top:8px">
+          <div class="face-item" v-for="(a,i) in processResult.assignments" :key="i">
+            <div class="face-pair">
+              <div>
+                <img v-if="processResult.ref_crops_map && processResult.ref_crops_map[a]" :src="'data:image/png;base64,'+processResult.ref_crops_map[a]">
+                <div class="sub-label">ref</div>
+              </div>
+              <div>
+                <img v-if="processResult.face_crops && processResult.face_crops[i]" :src="'data:image/png;base64,'+processResult.face_crops[i]">
+                <div class="sub-label">detected</div>
+              </div>
+            </div>
+            <div class="label">{{a}}</div>
+            <div class="score" v-if="processResult.similarities">sim: {{processResult.similarities[i]?.toFixed(4)}}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- All Detected Faces (YOLO raw) -->
+    <div class="result-section" v-if="processResult.all_detected_faces && processResult.all_detected_faces.length">
+      <h3 class="collapse-header" @click="collapseAllDetected=!collapseAllDetected">
+        <span class="collapse-arrow" :class="{open:collapseAllDetected}">&#9654;</span>
+        All YOLO Detections ({{processResult.all_detected_faces.length}})
+      </h3>
+      <div v-show="collapseAllDetected">
+        <table class="debug-table" style="margin-top:8px">
+          <tr><th>#</th><th>BBox</th><th>Confidence</th><th>Area</th></tr>
+          <tr v-for="(f,i) in processResult.all_detected_faces" :key="i">
+            <td>{{i+1}}</td>
+            <td>[{{f.bbox.join(', ')}}]</td>
+            <td>{{f.confidence.toFixed(3)}}</td>
+            <td>{{f.area}}</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- Tracked Faces -->
+    <div class="result-section" v-if="processResult.tracked_faces && processResult.tracked_faces.length">
+      <h3 class="collapse-header" @click="collapseTracked=!collapseTracked">
+        <span class="collapse-arrow" :class="{open:collapseTracked}">&#9654;</span>
+        Tracked Faces ({{processResult.tracked_faces.length}}) – keep_top: {{processResult.keep_face_count}}
+      </h3>
+      <div v-show="collapseTracked">
+        <table class="debug-table" style="margin-top:8px">
+          <tr><th>#</th><th>BBox</th><th>Size (WxH)</th><th>Assignment</th><th>Similarity</th><th>Area</th><th>Status</th></tr>
+          <tr v-for="(f,i) in processResult.tracked_faces" :key="i"
+              :style="{opacity: f.kept ? 1 : 0.5}">
+            <td>{{i+1}}</td>
+            <td>[{{f.bbox.join(', ')}}]</td>
+            <td>{{f.bbox[2]-f.bbox[0]}}x{{f.bbox[3]-f.bbox[1]}} ({{Math.max(f.bbox[2]-f.bbox[0], f.bbox[3]-f.bbox[1])}}px)</td>
+            <td>{{f.assignment}}</td>
+            <td>{{f.similarity.toFixed(4)}}</td>
+            <td>{{f.area}}</td>
+            <td>
+              <span v-if="f.kept" style="color:#4ecdc4">kept</span>
+              <span v-else style="color:#e94560">remain</span>
+            </td>
+          </tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- Before Postprocess: raw face crops with crop region -->
+    <div class="result-section" v-if="processResult.postprocess && processResult.postprocess.before && processResult.postprocess.before.length">
+      <h3 class="collapse-header" @click="collapseBefore=!collapseBefore">
+        <span class="collapse-arrow" :class="{open:collapseBefore}">&#9654;</span>
+        Before Postprocess – Raw Crops ({{processResult.postprocess.before.length}})
+      </h3>
+      <div v-show="collapseBefore">
+        <div class="face-grid" style="margin-top:8px">
+          <div class="face-item" v-for="(f,i) in processResult.postprocess.before" :key="'b'+i">
+            <img v-if="f.image_b64" :src="'data:image/png;base64,'+f.image_b64" style="max-width:200px;max-height:200px;width:auto;height:auto">
+            <div class="label">[{{f.label}}] {{f.assignment}}</div>
+            <div class="score">
+              <span class="level-badge" :class="'level-'+f.upscale_passes">{{f.upscale_passes}}x</span>
+              bbox: {{f.bbox[2]-f.bbox[0]}}x{{f.bbox[3]-f.bbox[1]}} ({{Math.max(f.bbox[2]-f.bbox[0], f.bbox[3]-f.bbox[1])}}px)
+            </div>
+            <div style="font-size:10px;color:#666">crop: [{{f.crop_region?.join(', ')}}] → {{f.image_w}}x{{f.image_h}}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- After Postprocess: detailer faces (square) with size -->
+    <div class="result-section" v-if="processResult.postprocess && processResult.postprocess.after && processResult.postprocess.after.length">
+      <h3 class="collapse-header" @click="collapseAfter=!collapseAfter">
+        <span class="collapse-arrow" :class="{open:collapseAfter}">&#9654;</span>
+        After Postprocess – Detailer Faces ({{processResult.postprocess.after.length}})
+      </h3>
+      <div v-show="collapseAfter">
+        <div class="face-grid" style="margin-top:8px">
+          <div class="face-item" v-for="(f,i) in processResult.postprocess.after" :key="'a'+i">
+            <div class="face-pair">
+              <div>
+                <img v-if="f.image_b64" :src="'data:image/png;base64,'+f.image_b64" style="max-width:200px;max-height:200px;width:auto;height:auto">
+                <div class="sub-label">crop</div>
+              </div>
+              <div v-if="f.mask_overlay_b64">
+                <img :src="'data:image/png;base64,'+f.mask_overlay_b64" style="max-width:200px;max-height:200px;width:auto;height:auto">
+                <div class="sub-label">segment mask</div>
+              </div>
+              <div v-if="f.eyebrow_mask_overlay_b64">
+                <img :src="'data:image/png;base64,'+f.eyebrow_mask_overlay_b64" style="max-width:200px;max-height:200px;width:auto;height:auto">
+                <div class="sub-label">eyebrow mask</div>
+              </div>
+            </div>
+            <div class="label">[{{f.label}}] {{f.assignment}}</div>
+            <div class="score">
+              <span class="level-badge" :class="'level-'+f.upscale_passes">{{f.upscale_passes}}x</span>
+              {{f.image_w}}x{{f.image_h}}
+              <span v-if="f.closed_eye_ratio > 0 && f.closed_eye_ratio >= settings.closed_eye_threshold" style="color:#e94560;font-weight:bold;margin-left:4px">CLOSED EYE {{(f.closed_eye_ratio*100).toFixed(0)}}%</span>
+              <span v-else-if="f.closed_eye_ratio > 0" style="margin-left:4px">{{(f.closed_eye_ratio*100).toFixed(0)}}%</span>
+            </div>
+            <div style="font-size:10px;color:#666">crop: [{{f.crop_region?.join(', ')}}]</div>
+          </div>
+        </div>
+        <div v-if="processResult.postprocess.remain_bboxes && processResult.postprocess.remain_bboxes.length" style="margin-top:12px">
+          <div style="font-size:13px;color:#e94560;margin-bottom:4px">Remain Faces ({{processResult.postprocess.remain_bboxes.length}})</div>
+          <table class="debug-table">
+            <tr><th>#</th><th>BBox</th></tr>
+            <tr v-for="(b,i) in processResult.postprocess.remain_bboxes" :key="i">
+              <td>{{i+1}}</td>
+              <td>[{{b.join(', ')}}]</td>
+            </tr>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Batch Detailer Results -->
+    <div class="result-section" v-if="processResult.detailer && processResult.detailer.results && processResult.detailer.results.length">
+      <h3 class="collapse-header" @click="collapseDetailer=!collapseDetailer">
+        <span class="collapse-arrow" :class="{open:collapseDetailer}">&#9654;</span>
+        Batch Detailer Results ({{processResult.detailer.results.length}} faces, {{processResult.detailer.iterations}} iter, {{processResult.detailer.total_time?.toFixed(2)}}s)
+        <span v-if="processResult.detailer.edge_blur != null" style="font-size:12px;color:#888;margin-left:8px">
+          blur={{processResult.detailer.edge_blur}} feather={{processResult.detailer.edge_feather}}
+        </span>
+      </h3>
+      <div v-show="collapseDetailer">
+        <div class="face-grid" style="margin-top:8px">
+          <div class="face-item" v-for="(f,i) in processResult.detailer.results" :key="'d'+i">
+            <div class="face-pair">
+              <div>
+                <img v-if="processResult.postprocess?.after?.[i]?.image_b64" :src="'data:image/png;base64,'+processResult.postprocess.after[i].image_b64" style="max-width:200px;max-height:200px;width:auto;height:auto">
+                <div class="sub-label">before</div>
+              </div>
+              <div>
+                <img v-if="f.enhanced_b64" :src="'data:image/png;base64,'+f.enhanced_b64" style="max-width:200px;max-height:200px;width:auto;height:auto">
+                <div class="sub-label">after</div>
+              </div>
+              <div v-if="f.mask_overlay_b64">
+                <img :src="'data:image/png;base64,'+f.mask_overlay_b64" style="max-width:200px;max-height:200px;width:auto;height:auto">
+                <div class="sub-label">mask</div>
+              </div>
+            </div>
+            <div class="label">[{{f.label}}]</div>
+            <div class="score">{{f.enhanced_w}}x{{f.enhanced_h}}</div>
+          </div>
+        </div>
+        <div v-if="processResult.detailer.batch_groups && processResult.detailer.batch_groups.length" style="margin-top:12px">
+          <div style="font-size:13px;color:#aaa;margin-bottom:4px">Batch Groups</div>
+          <table class="debug-table">
+            <tr><th>#</th><th>Type</th><th>Labels</th></tr>
+            <tr v-for="(g,i) in processResult.detailer.batch_groups" :key="i">
+              <td>{{i+1}}</td>
+              <td>{{g.type}}</td>
+              <td>{{g.labels.join(', ')}}</td>
+            </tr>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Info Text -->
+    <div class="result-section" v-if="processResult.info_text">
+      <h3 class="collapse-header" @click="collapseInfo=!collapseInfo">
+        <span class="collapse-arrow" :class="{open:collapseInfo}">&#9654;</span>
+        Full Info Log
+      </h3>
+      <div v-show="collapseInfo">
+        <div class="prompt-box" style="margin-top:8px">{{processResult.info_text}}</div>
+      </div>
+    </div>
+
+    <button class="btn btn-sm" @click="refreshResult" style="margin-top:12px">Refresh</button>
+  </div>
+  <div v-else style="color:#888">
+    No process result yet. Run a workflow with SoyaProcessDivider + SoyaProcessCollector first.
+    <button class="btn btn-sm" @click="refreshResult" style="margin-left:12px">Refresh</button>
+  </div>
+</div>
+
+<!-- Tab 4: Final Prompts -->
+<div class="panel" v-if="tab===4">
+  <div v-if="finalPrompts">
+    <div class="prompt-box" style="position:relative">
+      <button class="btn btn-sm copy-btn" @click="copyPrompts">Copy</button>
+      {{finalPrompts}}
+    </div>
+    <button class="btn btn-sm" @click="refreshPrompts" style="margin-top:12px">Refresh</button>
+  </div>
+  <div v-else style="color:#888">
+    No final prompts yet.
+    <button class="btn btn-sm" @click="refreshPrompts" style="margin-left:12px">Refresh</button>
+  </div>
+</div>
+</div>
+
+<script>
+const {createApp,ref,reactive,onMounted} = Vue;
+
+createApp({
+  setup(){
+    const tab = ref(1);
+    const characters = ref([]);
+    const settings = reactive({
+      base_path:'',
+      male_enhance_prompt:'',female_enhance_prompt:'',
+      common_prompt:'',
+      unknown_gender:'boy',unknown_eye_prompt:'',
+      bbox_model:'',clip_vision_model:'',bbox_device:'cuda:1',clip_device:'cuda:1',
+      bbox_threshold:0.5,face_crop_factor:3.0,ref_face_crop_factor:3.0,max_faces:3,
+      tracking_face_count:3,keep_face_count:3,target_size:512,detailer_face_crop_factor:3.0,
+      upscale_model:'',upscale_device:'cuda:1',preprocess_upscale:false,
+      sam2_model:'',grounding_dino_model:'',segment_device:'cuda:1',segment_prompt:'eyes',segment_threshold:0.3,
+      segs_min_distance:0,
+      crop_mode:'preserve',
+      keep_matched_only:false,
+      num_cpus:1,
+      faceid_ipadapter_file:'',faceid_weight:1.0,faceid_weight_faceidv2:1.0,
+      faceid_start_at:0.0,faceid_end_at:1.0,faceid_embeds_scaling:'V only',faceid_lora_strength:1.0,
+      faceid_clip_vision_model:'',
+      faceid_mask_sigma_factor:0.4,
+      mask_sigma_factor:0.4,
+      faceid_crop_zoom:1.0,
+      segment_method:'sam2',
+      eye_seg_model:'',
+      eye_seg_threshold:0.5,
+      eyebrow_mode:'off',
+      eyebrow_threshold:0.5,
+      eyebrow_model:'',
+      eyebrow_restore:false,
+      eyebrow_restore_mode:'hs_preserve',
+      eyebrow_blur:0,
+      eyebrow_hs_percentile:0.0,
+      eyebrow_v_range:1.0,
+      eyebrow_opacity:0.0,
+      closed_eye_threshold:0.8,
+      save_face_data:false,
+      face_data_path:'face_data',
+      face_detailer_enabled:false,
+      face_surrounding_mode:'bbox_scale',
+      face_surrounding_pixels:64,
+      face_bbox_scale_factor:1.3,
+      face_upscale_model:'',
+      face_upscale_device:'cuda:1',
+    });
+    const bboxModels = ref([]);
+    const clipModels = ref([]);
+    const upscaleModels = ref([]);
+    const sam2Models = ref([]);
+    const dinoModels = ref([]);
+    const ipadapterModels = ref([]);
+    const eyebrowModels = ref([]);
+    const soyaSegModels = ref([]);
+    const devices = ref(['cpu','cuda:0','cuda:1']);
+    const editing = ref(null);
+    const editForm = reactive({name:'',gender:'girl',eye_prompt:''});
+    const newChar = reactive({name:'',gender:'girl',eye_prompt:'',file:null,preview:null,dragover:false});
+    const processResult = ref(null);
+    const finalPrompts = ref(null);
+    const savedMsg = ref('');
+    const reloadMsg = ref('');
+    const vramData = reactive({gpus:[],processes:[],ram:{}});
+    const vramPolling = ref(false);
+    const faceidGenerating = ref(null);
+    let vramTimer = null;
+    // Collapse states
+    const collapseDetection = ref(true);
+    const collapseAllDetected = ref(false);
+    const collapseTracked = ref(false);
+    const collapsePostprocess = ref(true);
+    const collapseBefore = ref(true);
+    const collapseAfter = ref(true);
+    const collapseInfo = ref(false);
+    const collapseDetailer = ref(true);
+
+    async function refreshVram(){
+      try{
+        const d = await api('/soya_scheduler/api/vram');
+        vramData.gpus = d.gpus||[];
+        vramData.processes = d.processes||[];
+        vramData.ram = d.ram||{};
+      }catch(e){}
+    }
+    function procsForGpu(gpuIndex){
+      return vramData.processes.filter(p=>p.gpu_index===gpuIndex);
+    }
+    function toggleVramPoll(){
+      vramPolling.value = !vramPolling.value;
+      if(vramPolling.value){
+        refreshVram();
+        vramTimer = setInterval(refreshVram,2000);
+      } else {
+        clearInterval(vramTimer); vramTimer = null;
+      }
+    }
+
+    async function api(url,opts={}){
+      const r = await fetch(url,opts);
+      return r.json();
+    }
+
+    async function loadAll(){
+      const cfg = await api('/soya_scheduler/api/config');
+      Object.assign(settings, cfg.settings||{});
+      try{bboxModels.value = await api('/soya_scheduler/api/models/ultralytics_bbox')}catch(e){}
+      try{clipModels.value = await api('/soya_scheduler/api/models/clip_vision')}catch(e){}
+      try{upscaleModels.value = await api('/soya_scheduler/api/models/upscale_models')}catch(e){}
+      try{sam2Models.value = await api('/soya_scheduler/api/models/sam2')}catch(e){}
+      try{dinoModels.value = await api('/soya_scheduler/api/models/grounding_dino')}catch(e){}
+      try{ipadapterModels.value = await api('/soya_scheduler/api/models/ipadapter')}catch(e){}
+      try{eyebrowModels.value = await api('/soya_scheduler/api/models/eyebrow_seg')}catch(e){}
+      try{soyaSegModels.value = await api('/soya_scheduler/api/models/soya_seg')}catch(e){}
+      try{devices.value = await api('/soya_scheduler/api/devices')}catch(e){}
+      processResult.value = cfg.last_process_result;
+      finalPrompts.value = cfg.last_final_prompts;
+      characters.value = await api('/soya_scheduler/api/characters');
+    }
+
+    async function saveSettings(){
+      savedMsg.value = '';
+      await api('/soya_scheduler/api/config',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({settings:{...settings}})
+      });
+      // Reload from server to verify saved state
+      const cfg = await api('/soya_scheduler/api/config');
+      Object.assign(settings, cfg.settings||{});
+      savedMsg.value = 'Saved!';
+      setTimeout(()=>savedMsg.value='',2000);
+    }
+
+    async function reloadChars(){
+      reloadMsg.value = '';
+      await api('/soya_scheduler/api/reload',{method:'POST'});
+      await loadAll();
+      reloadMsg.value = 'Reloaded!';
+      setTimeout(()=>reloadMsg.value='',2000);
+    }
+
+    function startEdit(ch){
+      editing.value = ch.name;
+      Object.assign(editForm, {name:ch.name, gender:ch.gender, eye_prompt:ch.eye_prompt||''});
+    }
+
+    async function saveChar(ch){
+      await api('/soya_scheduler/api/characters/'+encodeURIComponent(ch.name),{
+        method:'PUT',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({...editForm})
+      });
+      editing.value = null;
+      await loadAll();
+    }
+
+    async function deleteChar(name){
+      if(!confirm('Delete this character?')) return;
+      await api('/soya_scheduler/api/characters/'+encodeURIComponent(name),{method:'DELETE'});
+      await loadAll();
+    }
+
+    async function addChar(){
+      if(!newChar.name){alert('Name is required');return}
+      if(!newChar.file){alert('Image is required');return}
+
+      const fd = new FormData();
+      fd.append('file',newChar.file);
+      fd.append('gender',newChar.gender);
+      fd.append('eye_prompt',newChar.eye_prompt);
+
+      await fetch('/soya_scheduler/api/characters/'+encodeURIComponent(newChar.name),{
+        method:'POST',body:fd
+      });
+
+      Object.assign(newChar,{name:'',gender:'girl',eye_prompt:'',file:null,preview:null,dragover:false});
+      await loadAll();
+    }
+
+    function handleNewCharDrop(event){
+      newChar.dragover = false;
+      const files = event.dataTransfer?.files;
+      if(files && files.length){
+        newChar.file = files[0];
+        newChar.preview = URL.createObjectURL(files[0]);
+      }
+    }
+
+    function handleNewCharFileSelect(event){
+      const files = event.target?.files;
+      if(files && files.length){
+        newChar.file = files[0];
+        newChar.preview = URL.createObjectURL(files[0]);
+      }
+    }
+
+    function clearNewCharFile(){
+      newChar.file = null;
+      newChar.preview = null;
+    }
+
+    function triggerUpload(name){
+      const el = document.getElementById('file-'+name);
+      if(el) el.click();
+    }
+
+    async function uploadImage(charName, event){
+      const files = event.target?.files;
+      if(!files||!files.length) return;
+      const fd = new FormData();
+      fd.append('file',files[0]);
+      await fetch('/soya_scheduler/api/characters/'+encodeURIComponent(charName)+'/image',{method:'POST',body:fd});
+      await loadAll();
+    }
+
+    async function refreshResult(){
+      const r = await api('/soya_scheduler/api/process_result');
+      processResult.value = r;
+    }
+
+    async function refreshPrompts(){
+      const r = await api('/soya_scheduler/api/final_prompts');
+      finalPrompts.value = r.prompts;
+    }
+
+    function copyPrompts(){
+      navigator.clipboard.writeText(finalPrompts.value||'');
+    }
+
+    async function generateFaceidEmbed(name){
+      faceidGenerating.value = name;
+      try{
+        const r = await fetch('/soya_scheduler/api/characters/'+encodeURIComponent(name)+'/faceid_embed',{method:'POST'});
+        const d = await r.json();
+        if(!r.ok){alert(d.error||'Failed');return}
+        await loadAll();
+      }catch(e){alert('Error: '+e.message)}
+      finally{faceidGenerating.value=null}
+    }
+
+    onMounted(()=>{loadAll();refreshVram()});
+
+    return {
+      tab,characters,settings,bboxModels,clipModels,upscaleModels,sam2Models,dinoModels,ipadapterModels,eyebrowModels,soyaSegModels,devices,
+      editing,editForm,newChar,processResult,finalPrompts,savedMsg,reloadMsg,
+      vramData,vramPolling,procsForGpu,toggleVramPoll,faceidGenerating,
+      collapseDetection,collapseAllDetected,collapseTracked,collapsePostprocess,collapseBefore,collapseAfter,collapseInfo,collapseDetailer,
+      saveSettings,reloadChars,startEdit,saveChar,deleteChar,addChar,
+      handleNewCharDrop,handleNewCharFileSelect,clearNewCharFile,
+      triggerUpload,uploadImage,refreshResult,refreshPrompts,copyPrompts,generateFaceidEmbed,
+    };
+  }
+}).mount('#app');
+</script>
+</body>
+</html>
