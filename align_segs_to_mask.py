@@ -7,7 +7,8 @@ import numpy as np
 try:
     from impact.core import SEG as ImpactSEG
 except ImportError:
-    ImpactSEG = None
+    from collections import namedtuple
+    ImpactSEG = namedtuple("SEG", ['cropped_image', 'cropped_mask', 'confidence', 'crop_region', 'bbox', 'label', 'control_net_wrapper'], defaults=[None])
 
 
 class AlignSegsToMaskBatch_mdsoya:

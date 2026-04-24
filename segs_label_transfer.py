@@ -1,5 +1,10 @@
 import torch
-from impact.core import SEG
+from collections import namedtuple
+
+try:
+    from impact.core import SEG
+except ImportError:
+    SEG = namedtuple("SEG", ['cropped_image', 'cropped_mask', 'confidence', 'crop_region', 'bbox', 'label', 'control_net_wrapper'], defaults=[None])
 
 
 class SegsLabelTransfer_mdsoya:
