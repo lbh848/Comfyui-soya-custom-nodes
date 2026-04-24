@@ -24,6 +24,8 @@ from .soya_string_to_float import SoyaStringToFloat_mdsoya
 from .soya_face_detailer_toggle import SoyaFaceDetailerToggle_mdsoya
 from .soya_simple_eye_collector import SoyaSimpleEyeCollector_mdsoya
 from .soya_seg_model_provider import SoyaSegModelProvider_mdsoya
+from .soya_passthrough import SoyaPassthrough_mdsoya
+from .soya_faceid_model_switch import SoyaFaceIDModelSwitch_mdsoya
 
 NODE_CLASS_MAPPINGS = {
     "SortBatchBySegsBBox_mdsoya": SortBatchBySegsBBox_mdsoya,
@@ -55,6 +57,8 @@ NODE_CLASS_MAPPINGS = {
     "SoyaFaceDetailerToggle_mdsoya": SoyaFaceDetailerToggle_mdsoya,
     "SoyaSimpleEyeCollector_mdsoya": SoyaSimpleEyeCollector_mdsoya,
     "SoyaSegModelProvider_mdsoya": SoyaSegModelProvider_mdsoya,
+    "SoyaPassthrough_mdsoya": SoyaPassthrough_mdsoya,
+    "SoyaFaceIDModelSwitch_mdsoya": SoyaFaceIDModelSwitch_mdsoya,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -87,6 +91,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaFaceDetailerToggle_mdsoya": "Face Detailer Toggle (Soya)",
     "SoyaSimpleEyeCollector_mdsoya": "Soya Simple Eye Collector (Soya)",
     "SoyaSegModelProvider_mdsoya": "Soya Seg Model Provider (Soya)",
+    "SoyaPassthrough_mdsoya": "Passthrough (Soya)",
+    "SoyaFaceIDModelSwitch_mdsoya": "Soya FaceID Model Switch (Soya)",
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
