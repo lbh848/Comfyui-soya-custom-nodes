@@ -1,5 +1,4 @@
 deepdanbooru_onnx
-ray
 spandrel
 sam2
 insightface

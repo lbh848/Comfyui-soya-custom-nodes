@@ -11,8 +11,13 @@ import time
 import torch
 import numpy as np
 import torch.nn.functional as F
+from collections import namedtuple
 
-from .soya_process_collector import SEG
+# Impact Pack SEG namedtuple compatibility (inlined from soya_process_collector)
+SEG = namedtuple("SEG", [
+    'cropped_image', 'cropped_mask', 'confidence',
+    'crop_region', 'bbox', 'label', 'control_net_wrapper',
+], defaults=[None])
 
 
 class SoyaBatchDetailer_mdsoya:
@@ -640,7 +645,7 @@ class SoyaBatchDetailer_mdsoya:
         """
         from PIL import Image as PILImage
         from scipy.ndimage import gaussian_filter
-        from .soya_process_collector import SEG
+        # SEG is already defined at module level
 
         kept_faces = context.get("kept_faces", [])
 
@@ -1470,7 +1475,7 @@ class SoyaBatchDetailer_mdsoya:
             results.append(entry)
 
         config = load_config()
-        if "last_process_result" not in config:
+        if not config.get("last_process_result"):
             config["last_process_result"] = {}
         config["last_process_result"]["detailer"] = {
             "results": results,
