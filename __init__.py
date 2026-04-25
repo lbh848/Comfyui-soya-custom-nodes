@@ -52,6 +52,7 @@ from .soya_simple_eye_collector import SoyaSimpleEyeCollector_mdsoya
 from .soya_seg_model_provider import SoyaSegModelProvider_mdsoya
 from .soya_faceid_model_switch import SoyaFaceIDModelSwitch_mdsoya
 from .soya_passthrough import SoyaPassthrough_mdsoya
+from .soya_ipadapter_patch_cleaner import SoyaIPAdapterPatchCleaner_mdsoya
 # [FaceID disabled - low performance]
 # from .soya_faceid_embed import SoyaFaceIDMaskPatcher_mdsoya, SoyaFaceIDModelPatcher_mdsoya
 # from .soya_process_collector_after import SoyaProcessCollectorAfter_mdsoya
@@ -116,6 +117,7 @@ NODE_CLASS_MAPPINGS = {
     "SoyaSegModelProvider_mdsoya": SoyaSegModelProvider_mdsoya,
     "SoyaFaceIDModelSwitch_mdsoya": SoyaFaceIDModelSwitch_mdsoya,
     "SoyaPassthrough_mdsoya": SoyaPassthrough_mdsoya,
+    "SoyaIPAdapterPatchCleaner_mdsoya": SoyaIPAdapterPatchCleaner_mdsoya,
     # [FaceID disabled - low performance]
     # "SoyaFaceIDMaskPatcher_mdsoya": SoyaFaceIDMaskPatcher_mdsoya,
     # "SoyaFaceIDModelPatcher_mdsoya": SoyaFaceIDModelPatcher_mdsoya,
@@ -182,6 +184,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaSegModelProvider_mdsoya": "Soya Seg Model Provider (Soya)",
     "SoyaFaceIDModelSwitch_mdsoya": "Soya FaceID Model Switch (Soya)",
     "SoyaPassthrough_mdsoya": "Passthrough (Soya)",
+    "SoyaIPAdapterPatchCleaner_mdsoya": "IPAdapter Patch Cleaner (Soya)",
     # [FaceID disabled - low performance]
     # "SoyaFaceIDMaskPatcher_mdsoya": "Soya FaceID Mask Patcher (Soya)",
     # "SoyaFaceIDModelPatcher_mdsoya": "Soya FaceID Model Patcher (Soya)",
