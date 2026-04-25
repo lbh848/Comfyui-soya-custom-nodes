@@ -10,6 +10,9 @@ Face Detection Flow:
   3. Both fail → raise error
 """
 
+import os
+import sys
+
 import numpy as np
 import torch
 
@@ -264,14 +267,18 @@ class SoyaFaceIDYoloFallback_mdsoya:
         if clip_vision is None:
             raise ValueError("clip_vision is required when update_model is true.")
 
+        custom_nodes_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if custom_nodes_dir not in sys.path:
+            sys.path.append(custom_nodes_dir)
+
         try:
             from comfyui_ipadapter_plus.IPAdapterPlus import (
                 IPAdapter, set_model_patch_replace,
             )
             from comfyui_ipadapter_plus.utils import encode_image_masked
-        except ImportError:
+        except ImportError as e:
             raise ImportError(
-                "comfyui_ipadapter_plus is required. "
+                f"comfyui_ipadapter_plus import failed: {e}. "
                 "Install from: https://github.com/cubiq/ComfyUI_IPAdapter_plus"
             )
 
