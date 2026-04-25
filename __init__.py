@@ -26,6 +26,7 @@ from .soya_simple_eye_collector import SoyaSimpleEyeCollector_mdsoya
 from .soya_seg_model_provider import SoyaSegModelProvider_mdsoya
 from .soya_passthrough import SoyaPassthrough_mdsoya
 from .soya_faceid_model_switch import SoyaFaceIDModelSwitch_mdsoya
+from .soya_ipadapter_patch_cleaner import SoyaIPAdapterPatchCleaner_mdsoya
 
 NODE_CLASS_MAPPINGS = {
     "SortBatchBySegsBBox_mdsoya": SortBatchBySegsBBox_mdsoya,
@@ -59,6 +60,7 @@ NODE_CLASS_MAPPINGS = {
     "SoyaSegModelProvider_mdsoya": SoyaSegModelProvider_mdsoya,
     "SoyaPassthrough_mdsoya": SoyaPassthrough_mdsoya,
     "SoyaFaceIDModelSwitch_mdsoya": SoyaFaceIDModelSwitch_mdsoya,
+    "SoyaIPAdapterPatchCleaner_mdsoya": SoyaIPAdapterPatchCleaner_mdsoya,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -93,6 +95,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaSegModelProvider_mdsoya": "Soya Seg Model Provider (Soya)",
     "SoyaPassthrough_mdsoya": "Passthrough (Soya)",
     "SoyaFaceIDModelSwitch_mdsoya": "Soya FaceID Model Switch (Soya)",
+    "SoyaIPAdapterPatchCleaner_mdsoya": "IPAdapter Patch Cleaner (Soya)",
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
