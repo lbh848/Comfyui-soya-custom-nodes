@@ -183,6 +183,20 @@ class SoyaFaceIDYoloFallback_mdsoya:
 
         import comfy.model_management
 
+        # ── Early exit if face detection is disabled ──
+        if update_model == "false":
+            transformer_options = model.model_options.setdefault("transformer_options", {})
+            patches_replace = transformer_options.setdefault("patches_replace", {})
+            if "attn2" in patches_replace:
+                del patches_replace["attn2"]
+            info = (
+                f"[Soya FaceID YOLO Fallback]\n"
+                f"  update_model: false - face detection skipped\n"
+                f"  mode: PASSTHROUGH"
+            )
+            print(info)
+            return (model, image, info)
+
         # ── Detect IPAdapter model type ──
         is_full = "proj.3.weight" in ipadapter["image_proj"]
         is_portrait = (
@@ -249,19 +263,6 @@ class SoyaFaceIDYoloFallback_mdsoya:
 
         face_cond_embeds = torch.cat(face_cond_embeds, dim=0)
         face_image_batch = torch.cat(face_images, dim=0)
-
-        # ── update_model = false: face detection only, skip IPAdapter patching ──
-        if update_model == "false":
-            # Clear any existing attn2 patches to ensure clean model
-            transformer_options = model.model_options.setdefault("transformer_options", {})
-            patches_replace = transformer_options.setdefault("patches_replace", {})
-            if "attn2" in patches_replace:
-                del patches_replace["attn2"]
-            info_lines.append(f"  mode: FACE_DETECT_ONLY (no model patch)")
-            info_lines.append(f"  faces_detected: {image.shape[0]}")
-            info = "\n".join(info_lines)
-            print(info)
-            return (model, face_image_batch, info)
 
         # ── update_model = true: apply IPAdapter patches ──
         if clip_vision is None:
