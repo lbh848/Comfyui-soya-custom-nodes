@@ -202,3 +202,10 @@ try:
     setup_routes()
 except Exception as e:
     print(f"[Soya:Scheduler] Failed to setup routes: {e}")
+
+# Soya Model Manager – API routes
+try:
+    from .soya_model_manager import setup_routes as _mm_setup
+    _mm_setup()
+except Exception as e:
+    print(f"[Soya:ModelManager] Failed to setup routes: {e}")
