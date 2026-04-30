@@ -69,8 +69,24 @@ MODEL_CATEGORIES = {
 # Active downloads tracking
 _active_downloads = {}
 
+# CivitAI API key (persisted to file)
+_CIVITAI_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".civitai_api_key")
+
 _DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(_DIR, "web")
+
+
+def _get_civitai_key() -> str:
+    try:
+        with open(_CIVITAI_KEY_FILE, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return ""
+
+
+def _set_civitai_key(key: str):
+    with open(_CIVITAI_KEY_FILE, "w") as f:
+        f.write(key.strip())
 
 
 def _get_model_dirs(category: str) -> list:
@@ -243,23 +259,50 @@ def setup_routes():
     @routes.get("/soya_model_manager/api/civitai/model/{model_id}")
     async def api_civitai_model_info(request):
         model_id = request.match_info["model_id"]
-        async with ClientSession(timeout=ClientTimeout(total=30)) as session:
-            async with session.get(f"https://civitai.com/api/v1/models/{model_id}") as resp:
-                if resp.status != 200:
-                    return web.json_response({"error": f"CivitAI API returned {resp.status}"}, status=resp.status)
-                data = await resp.json()
-                return web.json_response(data)
+        api_key = _get_civitai_key()
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        for attempt in range(3):
+            try:
+                async with ClientSession(timeout=ClientTimeout(total=30), headers=headers) as session:
+                    async with session.get(f"https://civitai.com/api/v1/models/{model_id}") as resp:
+                        if resp.status == 503:
+                            await asyncio.sleep(2)
+                            continue
+                        if resp.status != 200:
+                            text = await resp.text()
+                            return web.json_response({"error": f"CivitAI API returned {resp.status}: {text[:200]}"}, status=resp.status)
+                        data = await resp.json()
+                        return web.json_response(data)
+            except asyncio.TimeoutError:
+                continue
+        return web.json_response({"error": "CivitAI API unavailable after 3 retries (503)"}, status=503)
 
     # ── API: CivitAI - Get version info ────────────────────────
     @routes.get("/soya_model_manager/api/civitai/version/{version_id}")
     async def api_civitai_version_info(request):
         version_id = request.match_info["version_id"]
-        async with ClientSession(timeout=ClientTimeout(total=30)) as session:
-            async with session.get(f"https://civitai.com/api/v1/model-versions/{version_id}") as resp:
-                if resp.status != 200:
-                    return web.json_response({"error": f"CivitAI API returned {resp.status}"}, status=resp.status)
-                data = await resp.json()
-                return web.json_response(data)
+        api_key = _get_civitai_key()
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        for attempt in range(3):
+            try:
+                async with ClientSession(timeout=ClientTimeout(total=30), headers=headers) as session:
+                    async with session.get(f"https://civitai.com/api/v1/model-versions/{version_id}") as resp:
+                        if resp.status == 503:
+                            await asyncio.sleep(2)
+                            continue
+                        if resp.status != 200:
+                            return web.json_response({"error": f"CivitAI API returned {resp.status}"}, status=resp.status)
+                        data = await resp.json()
+                        return web.json_response(data)
+            except asyncio.TimeoutError:
+                continue
+        return web.json_response({"error": "CivitAI API unavailable after 3 retries"}, status=503)
 
     # ── API: Download model ────────────────────────────────────
     @routes.post("/soya_model_manager/api/download")
@@ -300,7 +343,8 @@ def setup_routes():
         }
 
         # Start download in background
-        asyncio.ensure_future(_do_download(download_id, url, filepath))
+        api_key = _get_civitai_key()
+        asyncio.ensure_future(_do_download(download_id, url, filepath, api_key))
 
         return web.json_response({"download_id": download_id, "status": "started"})
 
@@ -323,6 +367,19 @@ def setup_routes():
         if not model_id:
             return web.json_response({"error": "Could not parse CivitAI URL"}, status=400)
         return web.json_response({"model_id": model_id, "version_id": version_id})
+
+    # ── API: CivitAI API Key ────────────────────────────────────
+    @routes.get("/soya_model_manager/api/civitai-key")
+    async def api_get_civitai_key(request):
+        key = _get_civitai_key()
+        return web.json_response({"key": key})
+
+    @routes.post("/soya_model_manager/api/civitai-key")
+    async def api_set_civitai_key(request):
+        body = await request.json()
+        key = body.get("key", "").strip()
+        _set_civitai_key(key)
+        return web.json_response({"ok": True})
 
     # ── API: Direct URL download (non-CivitAI) ────────────────
     @routes.post("/soya_model_manager/api/download-direct")
@@ -365,20 +422,22 @@ def setup_routes():
             "total": 0,
         }
 
-        asyncio.ensure_future(_do_download(download_id, url, filepath))
+        api_key = _get_civitai_key()
+        asyncio.ensure_future(_do_download(download_id, url, filepath, api_key))
         return web.json_response({"download_id": download_id, "status": "started"})
 
     print("[Soya:ModelManager] API routes registered")
 
 
-async def _do_download(download_id: str, url: str, filepath: str):
+async def _do_download(download_id: str, url: str, filepath: str, api_key: str = ""):
     """Background download with progress tracking."""
     info = _active_downloads[download_id]
     tmp_path = filepath + ".downloading"
 
     try:
-        # CivitAI download URLs may need API key for some models
         headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         async with ClientSession(timeout=ClientTimeout(total=3600), headers=headers) as session:
             async with session.get(url, allow_redirects=True) as resp:
                 if resp.status != 200:
