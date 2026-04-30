@@ -92,6 +92,13 @@ h1{color:#4a90d9;margin-bottom:20px;font-size:1.5em}
     <!-- Download section -->
     <div class="download-box">
       <h3>Download Model</h3>
+
+      <!-- API Key -->
+      <div class="row" style="margin-bottom:8px">
+        <input v-model="civitaiKey" type="text" placeholder="CivitAI API Key (required for downloads)" style="flex:1;min-width:200px">
+        <button class="btn btn-sm" @click="saveApiKey" style="min-width:50px">Save</button>
+      </div>
+
       <div class="row">
         <input v-model="downloadUrl" placeholder="Paste CivitAI URL (e.g. https://civitai.com/models/12345) or direct download link" @keyup.enter="parseUrl" style="flex:1">
         <select v-model="downloadCategory" style="width:180px">
@@ -221,6 +228,7 @@ createApp({
     const downloads = ref({});
     const confirmDelete = ref('');
     const progressTimers = {};
+    const civitaiKey = ref('');
 
     const activeCategoryInfo = computed(() =>
       categories.value.find(c => c.key === activeCategory.value)
@@ -232,6 +240,7 @@ createApp({
         categories.value = await resp.json();
         if (!activeCategory.value && categories.value.length > 0) {
           activeCategory.value = categories.value[0].key;
+          downloadCategory.value = categories.value[0].key;
         }
       } catch (e) {
         console.error('Failed to load categories:', e);
@@ -479,7 +488,27 @@ createApp({
       return new Date(ts * 1000).toLocaleDateString();
     }
 
+    async function loadApiKey() {
+      try {
+        const resp = await fetch('/soya_model_manager/api/civitai-key');
+        const data = await resp.json();
+        civitaiKey.value = data.key || '';
+      } catch (e) {}
+    }
+
+    async function saveApiKey() {
+      const key = civitaiKey.value.trim();
+      try {
+        await fetch('/soya_model_manager/api/civitai-key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key }),
+        });
+      } catch (e) {}
+    }
+
     onMounted(() => {
+      loadApiKey();
       loadCategories().then(() => {
         if (activeCategory.value) refreshModels();
       });
@@ -489,9 +518,9 @@ createApp({
       categories, activeCategory, models, downloadUrl, downloadCategory,
       loading, civitaiModel, selectedVersion, showDirectDownload,
       directFilename, statusMsg, statusType, downloads, confirmDelete,
-      activeCategoryInfo,
+      activeCategoryInfo, civitaiKey,
       selectCategory, refreshModels, parseUrl, startCivitaiDownload,
-      startDirectDownload, deleteModel, formatSize, formatDate,
+      startDirectDownload, deleteModel, formatSize, formatDate, saveApiKey,
     };
   },
 }).mount('#app');

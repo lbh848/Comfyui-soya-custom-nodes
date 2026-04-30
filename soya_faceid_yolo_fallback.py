@@ -273,13 +273,13 @@ class SoyaFaceIDYoloFallback_mdsoya:
             sys.path.append(custom_nodes_dir)
 
         try:
-            from comfyui_ipadapter_plus.IPAdapterPlus import (
+            from ComfyUI_IPAdapter_plus.IPAdapterPlus import (
                 IPAdapter, set_model_patch_replace,
             )
-            from comfyui_ipadapter_plus.utils import encode_image_masked
+            from ComfyUI_IPAdapter_plus.utils import encode_image_masked
         except ImportError as e:
             raise ImportError(
-                f"comfyui_ipadapter_plus import failed: {e}. "
+                f"ComfyUI_IPAdapter_plus import failed: {e}. "
                 "Install from: https://github.com/cubiq/ComfyUI_IPAdapter_plus"
             )
 
