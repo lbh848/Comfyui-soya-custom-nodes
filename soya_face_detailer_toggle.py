@@ -68,6 +68,15 @@ class SoyaFaceDetailerToggle_mdsoya:
             B, H, W, C = image.shape
             return (image, torch.zeros((B, H, W), dtype=torch.float32))
 
+        # Defensive type checks – the workflow may have wrong wiring
+        if not hasattr(model, 'get_model_object'):
+            raise TypeError(
+                f"[SoyaFaceDetailerToggle] 'model' input received a "
+                f"{type(model).__name__} object instead of a MODEL. "
+                f"Check your workflow wiring — make sure a MODEL (not CLIP/VAE) "
+                f"is connected to the 'model' input."
+            )
+
         print("[SoyaFaceDetailerToggle] ENABLED — running face detailer")
 
         B, H, W, C = image.shape
