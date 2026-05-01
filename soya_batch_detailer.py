@@ -228,11 +228,12 @@ class SoyaBatchDetailer_mdsoya:
 
         # Step 4: VAE encode (color-adjusted) cropped images → latents (batched)
         _t = time.time()
-        _cuda = torch.device('cuda:0')
         import comfy.model_management as _mm
-        # Unload all models so vae.encode() only needs to LOAD VAE (no swap overhead)
-        _mm.unload_all_models()
-        _mm.soft_empty_cache()
+        # Load VAE alongside model — both fit in VRAM (4.3GB free, VAE ~200MB).
+        # This prevents vae.encode() from swapping out the SD model.
+        _t_pre = time.time()
+        _mm.load_models_gpu([model, vae.patcher])
+        print(f"[BENCH] VAE encode preload (model+VAE): {time.time() - _t_pre:.3f}s")
         _encode_groups = {}
         for i, seg in enumerate(segs_list):
             key = (seg.cropped_image.shape[1], seg.cropped_image.shape[2])
@@ -316,8 +317,10 @@ class SoyaBatchDetailer_mdsoya:
 
         # Step 7: VAE decode final latents → images (batched)
         _t = time.time()
-        _mm.unload_all_models()
-        _mm.soft_empty_cache()
+        # Reload VAE alongside model (KSampler may have offloaded VAE)
+        _t_pre = time.time()
+        _mm.load_models_gpu([model, vae.patcher])
+        print(f"[BENCH] VAE decode preload (model+VAE): {time.time() - _t_pre:.3f}s")
         _decode_groups = {}
         for i in range(len(segs_list)):
             wl = working_latents[i]
