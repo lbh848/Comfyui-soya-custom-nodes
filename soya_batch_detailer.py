@@ -11,8 +11,13 @@ import time
 import torch
 import numpy as np
 import torch.nn.functional as F
+from collections import namedtuple
 
-from .soya_process_collector import SEG
+# Impact Pack SEG namedtuple compatibility (inlined from soya_process_collector)
+SEG = namedtuple("SEG", [
+    'cropped_image', 'cropped_mask', 'confidence',
+    'crop_region', 'bbox', 'label', 'control_net_wrapper',
+], defaults=[None])
 
 
 class SoyaBatchDetailer_mdsoya:
@@ -121,9 +126,6 @@ class SoyaBatchDetailer_mdsoya:
             positive_conds_cache.append(cond)
 
         # Step 3.5: Build gradient masks and apply color adjustment BEFORE KSampler
-        from scipy.ndimage import distance_transform_edt
-        from PIL import Image as PILImage
-
         crop_grad_masks = []
 
         for i, seg in enumerate(segs_list):
@@ -143,23 +145,21 @@ class SoyaBatchDetailer_mdsoya:
             if m.max() > 1.0:
                 m = m / 255.0
 
-            m_np = m.numpy()
-            if m_np.shape[0] != crop_h or m_np.shape[1] != crop_w:
-                m_pil = PILImage.fromarray((m_np * 255).clip(0, 255).astype(np.uint8))
-                m_np = np.array(m_pil.resize((crop_w, crop_h), PILImage.BILINEAR)) / 255.0
+            if m.shape[0] != crop_h or m.shape[1] != crop_w:
+                m = self._resize_2d_gpu(m, crop_h, crop_w)
 
-            # Distance from boundary within the mask shape
-            binary = (m_np > 0.5)
-            dist = distance_transform_edt(binary)
+            # Distance from boundary within the mask shape (GPU)
+            binary = (m > 0.5)
+            dist = self._distance_transform_gpu(binary)
             max_dist = dist.max()
             if max_dist > 0:
                 norm_dist = dist / max_dist
-                grad = np.exp(-((1.0 - norm_dist) ** 2) / (2.0 * color_mask_sigma ** 2))
-                grad = (grad * binary).astype(np.float32)
+                grad = torch.exp(-((1.0 - norm_dist) ** 2) / (2.0 * color_mask_sigma ** 2))
+                grad = grad * binary.float()
             else:
-                grad = np.ones_like(m_np, dtype=np.float32)
+                grad = torch.ones_like(m)
 
-            crop_grad_masks.append(torch.from_numpy(grad))
+            crop_grad_masks.append(grad)
 
         # Stack masks (pad to max size if crops differ)
         max_h = max(m.shape[0] for m in crop_grad_masks)
@@ -294,7 +294,6 @@ class SoyaBatchDetailer_mdsoya:
         group_masks = []
         individual_masks_viz = [None] * len(segs_list)
         original_masks_viz = [None] * len(segs_list)
-        from scipy.ndimage import gaussian_filter
 
         for gi, group in enumerate(batch_groups):
             mask_tensor = None
@@ -313,18 +312,14 @@ class SoyaBatchDetailer_mdsoya:
                         m = m / 255.0
                     # Save original mask before any processing
                     original_masks_viz[idx] = m.clone()
-                    # Feather: create inward gradient from mask boundary
+                    # Feather: create inward gradient from mask boundary (GPU)
                     if edge_feather > 0:
-                        from scipy.ndimage import distance_transform_edt
-                        m_np = m.numpy()
-                        m_binary = (m_np > 0.5)
-                        dist_inward = distance_transform_edt(m_binary)
-                        m_feathered = np.clip(dist_inward / max(edge_feather, 1), 0.0, 1.0).astype(np.float32)
-                        m = torch.from_numpy(m_feathered)
-                    # Blur: smooth the transition
+                        m_binary = (m > 0.5)
+                        dist_inward = self._distance_transform_gpu(m_binary)
+                        m = torch.clamp(dist_inward / max(edge_feather, 1), 0.0, 1.0)
+                    # Blur: smooth the transition (GPU)
                     if edge_blur > 0:
-                        m_np = m.numpy() if isinstance(m, torch.Tensor) else m
-                        m = torch.from_numpy(gaussian_filter(m_np, sigma=edge_blur)).float()
+                        m = self._gaussian_blur_gpu(m, edge_blur)
                     masks.append(m.unsqueeze(0))
                     individual_masks_viz[idx] = m.clone()
                 mask_tensor = torch.cat(masks, dim=0)
@@ -422,22 +417,20 @@ class SoyaBatchDetailer_mdsoya:
                 if m.max() > 1.0:
                     m = m / 255.0
 
-                m_np = m.numpy()
-                if m_np.shape[0] != crop_h or m_np.shape[1] != crop_w:
-                    m_pil = PILImage.fromarray((m_np * 255).clip(0, 255).astype(np.uint8))
-                    m_np = np.array(m_pil.resize((crop_w, crop_h), PILImage.BILINEAR)) / 255.0
+                if m.shape[0] != crop_h or m.shape[1] != crop_w:
+                    m = self._resize_2d_gpu(m, crop_h, crop_w)
 
-                binary = (m_np > 0.5)
-                dist = distance_transform_edt(binary)
+                binary = (m > 0.5)
+                dist = self._distance_transform_gpu(binary)
                 max_dist = dist.max()
                 if max_dist > 0:
                     norm_dist = dist / max_dist
-                    grad = np.exp(-((1.0 - norm_dist) ** 2) / (2.0 * post_ca_mask_sigma ** 2))
-                    crop_mask = (grad * binary).astype(np.float32)
+                    crop_mask = torch.exp(-((1.0 - norm_dist) ** 2) / (2.0 * post_ca_mask_sigma ** 2))
+                    crop_mask = crop_mask * binary.float()
                 else:
-                    crop_mask = np.ones_like(m_np, dtype=np.float32)
+                    crop_mask = torch.ones_like(m)
 
-                post_crop_grad_masks.append(torch.from_numpy(crop_mask))
+                post_crop_grad_masks.append(crop_mask)
 
             # Apply color adjustment only when values are non-zero
             if has_post_change:
@@ -638,9 +631,7 @@ class SoyaBatchDetailer_mdsoya:
         - 'hsv_restore': Original mode – blur, percentile filter, V compression, then merge.
         - 'hs_preserve': Simple mode – H,S from original eyebrow, V from enhanced (1:1 pixel map).
         """
-        from PIL import Image as PILImage
-        from scipy.ndimage import gaussian_filter
-        from .soya_process_collector import SEG
+        # SEG is already defined at module level
 
         kept_faces = context.get("kept_faces", [])
 
@@ -656,7 +647,7 @@ class SoyaBatchDetailer_mdsoya:
             original_crop = kf["image"]   # (1, H_orig, W_orig, 3)
             enh_h, enh_w = enhanced.shape[1], enhanced.shape[2]
 
-            # Resize original to match enhanced
+            # Resize original to match enhanced (GPU, then to numpy for HSV ops)
             if original_crop.shape[1] != enh_h or original_crop.shape[2] != enh_w:
                 original_resized = F.interpolate(
                     original_crop.permute(0, 3, 1, 2),
@@ -665,10 +656,10 @@ class SoyaBatchDetailer_mdsoya:
             else:
                 original_resized = original_crop[0].cpu().numpy()
 
-            # Resize mask to match enhanced
+            # Resize mask to match enhanced (GPU)
             if eb_mask.shape[0] != enh_h or eb_mask.shape[1] != enh_w:
-                mask_pil = PILImage.fromarray((eb_mask * 255).clip(0, 255).astype(np.uint8))
-                eb_mask = np.array(mask_pil.resize((enh_w, enh_h), PILImage.BILINEAR)) / 255.0
+                eb_mask_t = torch.from_numpy(eb_mask).float() if isinstance(eb_mask, np.ndarray) else eb_mask.float()
+                eb_mask = SoyaBatchDetailer_mdsoya._resize_2d_gpu(eb_mask_t, enh_h, enh_w).cpu().numpy()
 
             threshold = kf.get("eyebrow_threshold", 0.5)
             binary = (eb_mask > threshold).astype(np.float32)
@@ -687,12 +678,14 @@ class SoyaBatchDetailer_mdsoya:
                 merged_rgb = SoyaBatchDetailer_mdsoya._hsv_to_rgb(merged_hsv)
             else:
                 # hsv_restore: original full processing mode
-                # Blur original eyebrow area to reduce noise before HS extraction
+                # Blur original eyebrow area to reduce noise before HS extraction (GPU)
                 if eyebrow_blur > 0:
-                    original_resized = np.stack([
-                        gaussian_filter(original_resized[:, :, c], sigma=eyebrow_blur)
+                    orig_t = torch.from_numpy(original_resized).permute(2, 0, 1)  # (3, H, W)
+                    blurred = torch.stack([
+                        SoyaBatchDetailer_mdsoya._gaussian_blur_gpu(orig_t[c], eyebrow_blur)
                         for c in range(3)
-                    ], axis=-1).astype(np.float32)
+                    ], dim=-1)
+                    original_resized = blurred.cpu().numpy()
 
                 # HSV conversion
                 orig_hsv = SoyaBatchDetailer_mdsoya._rgb_to_hsv(original_resized)
@@ -849,8 +842,6 @@ class SoyaBatchDetailer_mdsoya:
         5. Apply eyebrow opacity (blend eyebrow area with original)
         6. Fill remain face holes with original pixels
         """
-        from PIL import Image as PILImage
-
         result = original_image.clone()
         img_h, img_w = original_image.shape[1], original_image.shape[2]
 
@@ -951,10 +942,11 @@ class SoyaBatchDetailer_mdsoya:
             if crop_h <= 0 or crop_w <= 0 or enhanced is None:
                 continue
 
-            # Resize enhanced by exact downscale factor (lanczos)
-            _enh_np = (enhanced[0].cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
-            _enh_pil = PILImage.fromarray(_enh_np).resize((target_w, target_h), PILImage.LANCZOS)
-            resized = torch.from_numpy(np.array(_enh_pil).astype(np.float32) / 255.0)  # (target_h, target_w, 3)
+            # Resize enhanced by exact downscale factor (GPU bicubic)
+            resized = F.interpolate(
+                enhanced.permute(0, 3, 1, 2),
+                size=(target_h, target_w), mode='bicubic', align_corners=False,
+            ).permute(0, 2, 3, 1)[0].clamp(0, 1)  # (target_h, target_w, 3)
 
             # Read padding offsets from context (zero when crop was within image bounds)
             _kf = context.get("kept_faces", [{}])
@@ -1028,10 +1020,11 @@ class SoyaBatchDetailer_mdsoya:
                     if kf_entry.get("image") is not None:
                         _orig_crop = kf_entry["image"]  # (1, enh_h, enh_w, 3) before detailer
                         _oc_h, _oc_w = _orig_crop.shape[1], _orig_crop.shape[2]
-                        _oc_np = (_orig_crop[0].cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
-                        _oc_pil = PILImage.fromarray(_oc_np)
-                        _oc_resized = _oc_pil.resize((target_w, target_h), PILImage.LANCZOS)
-                        _oc_resized_f = np.array(_oc_resized).astype(np.float32) / 255.0
+                        _oc_resized = F.interpolate(
+                            _orig_crop.permute(0, 3, 1, 2),
+                            size=(target_h, target_w), mode='bicubic', align_corners=False,
+                        ).permute(0, 2, 3, 1)[0].clamp(0, 1)
+                        _oc_resized_f = _oc_resized.cpu().numpy()
                         if has_padding:
                             # Compare only valid region at corrected paste position
                             _oc_valid = _oc_resized_f[valid_y:valid_y+valid_h, valid_x:valid_x+valid_w]
@@ -1081,7 +1074,6 @@ class SoyaBatchDetailer_mdsoya:
         # Step 5: Apply eyebrow opacity (blend eyebrow area back toward original)
         if eyebrow_opacity > 0:
             kept_faces = context.get("kept_faces", [])
-            from PIL import Image as PILImage
 
             for seg_idx, seg in enumerate(updated_segs):
                 if seg_idx >= len(kept_faces):
@@ -1102,9 +1094,10 @@ class SoyaBatchDetailer_mdsoya:
                 cx2 = cx1 + target_w
                 cy2 = cy1 + target_h
 
-                # Resize eyebrow mask to paste area (target_h x target_w)
-                mask_pil = PILImage.fromarray((eb_mask * 255).clip(0, 255).astype(np.uint8))
-                eb_resized = np.array(mask_pil.resize((target_w, target_h), PILImage.BILINEAR)) / 255.0
+                # Resize eyebrow mask to paste area (target_h x target_w) via GPU
+                eb_mask_t = torch.from_numpy(eb_mask).float() if isinstance(eb_mask, np.ndarray) else eb_mask.float()
+                eb_resized_t = SoyaBatchDetailer_mdsoya._resize_2d_gpu(eb_mask_t, target_h, target_w)
+                eb_resized = eb_resized_t.cpu().numpy()
 
                 threshold = kf.get("eyebrow_threshold", 0.5)
                 binary = (eb_resized > threshold).astype(np.float32)
@@ -1190,9 +1183,6 @@ class SoyaBatchDetailer_mdsoya:
     @staticmethod
     def _build_eyebrow_overlay_preview(updated_segs, context):
         """Build enhanced crop preview with eyebrow mask overlaid per crop."""
-        from PIL import Image as PILImage
-        from scipy.ndimage import binary_erosion
-
         kept_faces = context.get("kept_faces", [])
 
         if not updated_segs:
@@ -1216,17 +1206,15 @@ class SoyaBatchDetailer_mdsoya:
                 eb_mask = kept_faces[i]["eyebrow_mask"]  # (H_mask, W_mask) float32
                 threshold = kept_faces[i].get("eyebrow_threshold", 0.5)
 
-                # Resize mask to enhanced crop dimensions (upscale match)
+                # Resize mask to enhanced crop dimensions (upscale match, GPU)
                 mask_h, mask_w = eb_mask.shape[:2]
                 if mask_h != h or mask_w != w:
-                    mask_pil = PILImage.fromarray((eb_mask * 255).clip(0, 255).astype(np.uint8))
-                    eb_mask = np.array(mask_pil.resize((w, h), PILImage.BILINEAR)) / 255.0
+                    eb_mask_t = torch.from_numpy(eb_mask).float() if isinstance(eb_mask, np.ndarray) else eb_mask.float()
+                    eb_mask = SoyaBatchDetailer_mdsoya._resize_2d_gpu(eb_mask_t, h, w).cpu().numpy()
 
-                # Resize mask to display size (512 width)
-                eb_display = np.array(
-                    PILImage.fromarray((eb_mask * 255).clip(0, 255).astype(np.uint8))
-                    .resize((512, new_h), PILImage.BILINEAR)
-                ) / 255.0
+                # Resize mask to display size (512 width, GPU)
+                eb_mask_t = torch.from_numpy(eb_mask).float() if isinstance(eb_mask, np.ndarray) else eb_mask.float()
+                eb_display = SoyaBatchDetailer_mdsoya._resize_2d_gpu(eb_mask_t, new_h, 512).cpu().numpy()
 
                 # Semi-transparent green overlay on enhanced crop
                 overlay = r.cpu().numpy().copy()
@@ -1235,9 +1223,11 @@ class SoyaBatchDetailer_mdsoya:
                 green_tint[:, :, 1] = 200.0 / 255.0
                 overlay = overlay * (1 - alpha) + green_tint * alpha
 
-                # Red boundary at mask edge
+                # Red boundary at mask edge (GPU erosion)
                 binary_mask = eb_display > threshold
-                eroded = binary_erosion(binary_mask)
+                binary_t = torch.from_numpy(binary_mask.astype(np.float32))
+                eroded_t = -F.max_pool2d(-binary_t.unsqueeze(0).unsqueeze(0), 3, stride=1, padding=1)
+                eroded = (eroded_t.squeeze(0).squeeze(0).numpy() > 0.5)
                 boundary = binary_mask & ~eroded
                 if np.any(boundary):
                     overlay[boundary] = [1.0, 0.15, 0.15]
@@ -1279,8 +1269,6 @@ class SoyaBatchDetailer_mdsoya:
     @staticmethod
     def _build_eyebrow_crop_preview(updated_segs, context):
         """Same layout as enhanced, but only eyebrow pixels from original crop (black elsewhere)."""
-        from PIL import Image as PILImage
-
         kept_faces = context.get("kept_faces", [])
 
         if not updated_segs:
@@ -1308,15 +1296,15 @@ class SoyaBatchDetailer_mdsoya:
                     size=(enh_h, enh_w), mode='bilinear', align_corners=False,
                 ).permute(0, 2, 3, 1)
 
-            # Resize mask to match enhanced dimensions
+            # Resize mask to match enhanced dimensions (GPU)
             mask_h, mask_w = eb_mask.shape[:2]
             if mask_h != enh_h or mask_w != enh_w:
-                mask_pil = PILImage.fromarray((eb_mask * 255).clip(0, 255).astype(np.uint8))
-                eb_mask = np.array(mask_pil.resize((enh_w, enh_h), PILImage.BILINEAR)) / 255.0
+                eb_mask_t = torch.from_numpy(eb_mask).float() if isinstance(eb_mask, np.ndarray) else eb_mask.float()
+                eb_mask = SoyaBatchDetailer_mdsoya._resize_2d_gpu(eb_mask_t, enh_h, enh_w)
 
             # Binary mask from threshold → keep only eyebrow pixels
-            binary = (eb_mask > threshold).astype(np.float32)
-            mask_3ch = torch.from_numpy(binary[:, :, np.newaxis])  # (H, W, 1)
+            binary = (eb_mask > threshold).float()
+            mask_3ch = binary.unsqueeze(-1) if isinstance(binary, torch.Tensor) else torch.from_numpy(binary.unsqueeze(-1))
             masked = original_crop[0] * mask_3ch  # (H, W, 3)
 
             # Same resize as enhanced: 512 width, using enhanced dimensions
@@ -1337,9 +1325,6 @@ class SoyaBatchDetailer_mdsoya:
     @staticmethod
     def _build_eyebrow_blur_preview(updated_segs, context, sigma):
         """Same as eyebrow_crop but with Gaussian blur applied to original eyebrow pixels."""
-        from PIL import Image as PILImage
-        from scipy.ndimage import gaussian_filter
-
         kept_faces = context.get("kept_faces", [])
 
         if not updated_segs or sigma <= 0:
@@ -1365,23 +1350,25 @@ class SoyaBatchDetailer_mdsoya:
                     size=(enh_h, enh_w), mode='bilinear', align_corners=False,
                 ).permute(0, 2, 3, 1)
 
-            # Resize mask to match enhanced
+            # Resize mask to match enhanced (GPU)
             mask_h, mask_w = eb_mask.shape[:2]
             if mask_h != enh_h or mask_w != enh_w:
-                mask_pil = PILImage.fromarray((eb_mask * 255).clip(0, 255).astype(np.uint8))
-                eb_mask = np.array(mask_pil.resize((enh_w, enh_h), PILImage.BILINEAR)) / 255.0
+                eb_mask_t = torch.from_numpy(eb_mask).float() if isinstance(eb_mask, np.ndarray) else eb_mask.float()
+                eb_mask = SoyaBatchDetailer_mdsoya._resize_2d_gpu(eb_mask_t, enh_h, enh_h)
 
-            # Blur original eyebrow pixels
-            orig_np = original_crop[0].cpu().numpy()
-            blurred = np.stack([
-                gaussian_filter(orig_np[:, :, c], sigma=sigma)
+            # Blur original eyebrow pixels (GPU)
+            orig_t = original_crop[0].permute(2, 0, 1)  # (3, H, W)
+            blurred = torch.stack([
+                SoyaBatchDetailer_mdsoya._gaussian_blur_gpu(orig_t[c], sigma)
                 for c in range(3)
-            ], axis=-1).astype(np.float32)
+            ], dim=-1)
 
             # Apply binary mask → only eyebrow pixels visible
-            binary = (eb_mask > threshold).astype(np.float32)
-            mask_3ch = torch.from_numpy(binary[:, :, np.newaxis])
-            masked = torch.from_numpy(blurred) * mask_3ch
+            binary = (eb_mask > threshold).float()
+            if isinstance(binary, np.ndarray):
+                binary = torch.from_numpy(binary)
+            mask_3ch = binary.unsqueeze(-1)
+            masked = blurred * mask_3ch
 
             # Same resize as enhanced: 512 width
             new_h = max(1, int(enh_h * 512 / enh_w))
@@ -1405,7 +1392,6 @@ class SoyaBatchDetailer_mdsoya:
         """Save enhanced crops and mask overlay as base64 to config for web UI display."""
         import io, base64
         from PIL import Image as PILImage
-        from scipy.ndimage import binary_erosion
         from .soya_scheduler.config_manager import load_config, save_config
 
         results = []
@@ -1434,13 +1420,13 @@ class SoyaBatchDetailer_mdsoya:
                                and original_masks_viz[i] is not None)
                            else mask_np)
 
-                # Resize mask to match enhanced image if needed
+                # Resize mask to match enhanced image if needed (GPU)
                 h, w = enhanced_np.shape[:2]
                 if (mask_np.shape[0], mask_np.shape[1]) != (h, w):
-                    mask_pil = PILImage.fromarray((mask_np * 255).astype(np.uint8))
-                    mask_np = np.array(mask_pil.resize((w, h), PILImage.BILINEAR)) / 255.0
-                    orig_pil = PILImage.fromarray((orig_np * 255).astype(np.uint8))
-                    orig_np = np.array(orig_pil.resize((w, h), PILImage.BILINEAR)) / 255.0
+                    mask_t = torch.from_numpy(mask_np).float()
+                    mask_np = SoyaBatchDetailer_mdsoya._resize_2d_gpu(mask_t, h, w).cpu().numpy()
+                    orig_t = torch.from_numpy(orig_np).float()
+                    orig_np = SoyaBatchDetailer_mdsoya._resize_2d_gpu(orig_t, h, w).cpu().numpy()
 
                 overlay = enhanced_np.astype(np.float32).copy()
 
@@ -1450,9 +1436,11 @@ class SoyaBatchDetailer_mdsoya:
                 blue_tint[:, :, 2] = 200  # blue channel
                 overlay = overlay * (1 - alpha) + blue_tint * alpha
 
-                # Red outline at original mask boundary
+                # Red outline at original mask boundary (GPU erosion)
                 orig_binary = orig_np > 0.5
-                eroded = binary_erosion(orig_binary)
+                orig_binary_t = torch.from_numpy(orig_binary.astype(np.float32))
+                eroded_t = -F.max_pool2d(-orig_binary_t.unsqueeze(0).unsqueeze(0), 3, stride=1, padding=1)
+                eroded = (eroded_t.squeeze(0).squeeze(0).numpy() > 0.5)
                 boundary = orig_binary & ~eroded
                 overlay[boundary] = [255, 50, 50]
 
@@ -1470,7 +1458,7 @@ class SoyaBatchDetailer_mdsoya:
             results.append(entry)
 
         config = load_config()
-        if "last_process_result" not in config:
+        if not config.get("last_process_result"):
             config["last_process_result"] = {}
         config["last_process_result"]["detailer"] = {
             "results": results,
@@ -1488,3 +1476,46 @@ class SoyaBatchDetailer_mdsoya:
             "total_time": elapsed,
         }
         save_config(config)
+
+    # ── GPU-optimized image processing (replaces PIL & scipy) ────
+
+    @staticmethod
+    def _gaussian_blur_gpu(mask, sigma):
+        """Gaussian blur via separable convolution — no CPU transfer."""
+        ksize = int(6 * sigma + 1)
+        if ksize % 2 == 0:
+            ksize += 1
+        x = torch.arange(ksize, dtype=torch.float32, device=mask.device) - ksize // 2
+        kernel = torch.exp(-x ** 2 / (2 * sigma ** 2))
+        kernel = kernel / kernel.sum()
+        mask_4d = mask.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+        pad = ksize // 2
+        padded = F.pad(mask_4d, [pad, pad, 0, 0], mode='reflect')
+        blurred = F.conv2d(padded, kernel.view(1, 1, 1, -1))
+        padded = F.pad(blurred, [0, 0, pad, pad], mode='reflect')
+        blurred = F.conv2d(padded, kernel.view(1, 1, -1, 1))
+        return blurred.squeeze(0).squeeze(0)
+
+    @staticmethod
+    def _resize_2d_gpu(mask, target_h, target_w):
+        """Resize a 2D mask tensor via F.interpolate (no PIL)."""
+        m4 = mask.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+        m4 = F.interpolate(m4, size=(target_h, target_w), mode='bilinear', align_corners=False)
+        return m4.squeeze(0).squeeze(0)
+
+    @staticmethod
+    def _distance_transform_gpu(binary_mask):
+        """GPU distance transform via iterative erosion (Manhattan approx.)."""
+        h, w = binary_mask.shape
+        mask_4d = binary_mask.float().unsqueeze(0).unsqueeze(0)
+        dist = torch.zeros(1, 1, h, w, dtype=torch.float32, device=binary_mask.device)
+        remaining = mask_4d.clone()
+        for d in range(1, max(h, w) + 1):
+            eroded = -F.max_pool2d(-remaining, 3, stride=1, padding=1)
+            eroded = (eroded > 0.5).float()
+            boundary = remaining - eroded
+            dist += boundary * d
+            remaining = eroded
+            if remaining.sum() < 0.5:
+                break
+        return dist.squeeze(0).squeeze(0)
