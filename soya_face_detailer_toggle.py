@@ -32,21 +32,25 @@ class SoyaFaceDetailerToggle_mdsoya:
     FUNCTION = "doit"
     CATEGORY = "Soya"
 
-    def doit(self, enable, image, model, clip, vae, guide_size, guide_size_for, max_size,
-             seed, steps, cfg, sampler_name, scheduler,
-             positive, negative, denoise, feather, noise_mask, force_inpaint,
-             bbox_threshold, bbox_dilation, bbox_crop_factor,
-             sam_detection_hint, sam_dilation, sam_threshold, sam_bbox_expansion,
-             sam_mask_hint_threshold, sam_mask_hint_use_negative,
-             drop_size, bbox_detector, wildcard, cycle=1,
-             sam_model_opt=None, segm_detector_opt=None, detailer_hook=None,
-             inpaint_model=False, noise_mask_feather=0,
-             scheduler_func_opt=None, tiled_encode=False, tiled_decode=False):
+    def doit(self, **kwargs):
 
+        enable = kwargs.get("enable", "true")
         use = enable.strip().lower() in ("true", "1", "yes")
 
         if not use:
             print("[SoyaFaceDetailerToggle] DISABLED — bypassing FaceDetailer")
+            image = kwargs["image"]
+            model = kwargs["model"]
+            clip = kwargs["clip"]
+            vae = kwargs["vae"]
+            positive = kwargs.get("positive")
+            negative = kwargs.get("negative")
+            wildcard = kwargs.get("wildcard")
+            bbox_detector = kwargs.get("bbox_detector")
+            segm_detector_opt = kwargs.get("segm_detector_opt")
+            sam_model_opt = kwargs.get("sam_model_opt")
+            detailer_hook = kwargs.get("detailer_hook")
+
             B, H, W, C = image.shape
             empty_mask = torch.zeros((B, H, W), dtype=torch.float32)
             empty_img = [torch.zeros((1, 64, 64, 3), dtype=torch.float32)]
@@ -57,16 +61,6 @@ class SoyaFaceDetailerToggle_mdsoya:
 
         print("[SoyaFaceDetailerToggle] ENABLED — running FaceDetailer")
         fd = FaceDetailer()
-        return fd.doit(
-            image, model, clip, vae, guide_size, guide_size_for, max_size,
-            seed, steps, cfg, sampler_name, scheduler,
-            positive, negative, denoise, feather, noise_mask, force_inpaint,
-            bbox_threshold, bbox_dilation, bbox_crop_factor,
-            sam_detection_hint, sam_dilation, sam_threshold, sam_bbox_expansion,
-            sam_mask_hint_threshold, sam_mask_hint_use_negative,
-            drop_size, bbox_detector, wildcard, cycle,
-            sam_model_opt=sam_model_opt, segm_detector_opt=segm_detector_opt,
-            detailer_hook=detailer_hook, inpaint_model=inpaint_model,
-            noise_mask_feather=noise_mask_feather, scheduler_func_opt=scheduler_func_opt,
-            tiled_encode=tiled_encode, tiled_decode=tiled_decode,
-        )
+        # Pass all kwargs except 'enable' to FaceDetailer
+        fd_kwargs = {k: v for k, v in kwargs.items() if k != "enable"}
+        return fd.doit(**fd_kwargs)
