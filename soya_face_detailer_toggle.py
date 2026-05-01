@@ -3,12 +3,14 @@ SoyaFaceDetailerToggle – Face detailer without Impact Pack dependency.
 
 Uses ComfyUI's built-in KSampler, VAE encode/decode, and YOLO-based
 bbox detection directly.  enable=False passes the original image through.
+
+Optimized: All image resize/blur done with torch ops (F.interpolate, F.conv2d)
+to eliminate GPU↔CPU transfers — critical for Docker environments.
 """
 
 import torch
 import torch.nn.functional as F
 import numpy as np
-from PIL import Image as PILImage
 
 
 class SoyaFaceDetailerToggle_mdsoya:
@@ -105,7 +107,7 @@ class SoyaFaceDetailerToggle_mdsoya:
         return (result_image, combined_mask)
 
     # ------------------------------------------------------------------
-    # Detail a single image
+    # Detail a single image (GPU-optimized, no PIL/scipy transfers)
     # ------------------------------------------------------------------
     def _detail_single(self, image, model, vae, positive_cond, negative_cond,
                        seed, steps, cfg, sampler_name, scheduler, denoise,
@@ -114,7 +116,7 @@ class SoyaFaceDetailerToggle_mdsoya:
 
         _, H, W, C = image.shape
 
-        # 1. Detect faces with YOLO
+        # 1. Detect faces with YOLO (only CPU transfer needed here)
         bboxes = self._detect_faces(image, bbox_detector, bbox_threshold)
 
         if not bboxes:
@@ -128,7 +130,6 @@ class SoyaFaceDetailerToggle_mdsoya:
             x1, y1, x2, y2 = bbox
             bw, bh = x2 - x1, y2 - y1
 
-            # Skip tiny faces
             if bw < drop_size or bh < drop_size:
                 continue
 
@@ -136,7 +137,6 @@ class SoyaFaceDetailerToggle_mdsoya:
             cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
             ew, eh = bw * crop_factor, bh * crop_factor
 
-            # If guide_size > 0, scale so longer side matches guide_size
             if guide_size > 0:
                 scale = guide_size / max(bw, bh)
                 ew = bw * max(crop_factor, scale)
@@ -151,8 +151,8 @@ class SoyaFaceDetailerToggle_mdsoya:
             if crop_w < 1 or crop_h < 1:
                 continue
 
-            # 3. Crop and resize to guide_size
-            crop_img = image[0, cy1:cy2, cx1:cx2].clone()  # (crop_h, crop_w, C)
+            # 3. Crop and resize on GPU (no PIL)
+            crop_tensor = image[0, cy1:cy2, cx1:cx2].clone()  # (crop_h, crop_w, C)
 
             if guide_size > 0:
                 target_h = int(crop_h * guide_size / max(crop_h, crop_w))
@@ -163,21 +163,19 @@ class SoyaFaceDetailerToggle_mdsoya:
                 target_h = crop_h
                 target_w = crop_w
 
-            crop_pil = PILImage.fromarray((crop_img.cpu().numpy() * 255).astype(np.uint8))
-            crop_pil = crop_pil.resize((target_w, target_h), PILImage.LANCZOS)
-            crop_tensor = torch.from_numpy(np.array(crop_pil).astype(np.float32) / 255.0)
-            crop_tensor = crop_tensor.unsqueeze(0)  # (1, target_h, target_w, 3)
+            # GPU resize via F.interpolate (NCHW)
+            crop_4d = crop_tensor.permute(2, 0, 1).unsqueeze(0)
+            crop_4d = F.interpolate(crop_4d, size=(target_h, target_w), mode='bicubic', align_corners=False)
+            crop_tensor = crop_4d.squeeze(0).permute(1, 2, 0).unsqueeze(0)  # (1, target_h, target_w, C)
 
-            # 4. Build mask for the cropped region
+            # 4. Build mask on GPU
             mask = torch.ones((target_h, target_w), dtype=torch.float32)
 
-            # Apply bbox dilation to the local bbox coordinates
             local_x1 = max(0, x1 - cx1 + bbox_dilation)
             local_y1 = max(0, y1 - cy1 + bbox_dilation)
             local_x2 = min(crop_w, x2 - cx1 - bbox_dilation)
             local_y2 = min(crop_h, y2 - cy1 - bbox_dilation)
 
-            # Scale local coords to target size
             sx = target_w / crop_w
             sy = target_h / crop_h
             local_x1 = int(local_x1 * sx)
@@ -190,12 +188,9 @@ class SoyaFaceDetailerToggle_mdsoya:
                 inner[local_y1:local_y2, local_x1:local_x2] = 1.0
                 mask = inner
 
-            # Feather the mask
+            # Feather with GPU Gaussian blur (replaces scipy)
             if feather > 0:
-                from scipy.ndimage import gaussian_filter
-                mask = torch.from_numpy(
-                    gaussian_filter(mask.numpy(), sigma=feather)
-                ).float()
+                mask = self._gaussian_blur_gpu(mask, feather)
 
             mask_batch = mask.unsqueeze(0)  # (1, target_h, target_w)
 
@@ -213,23 +208,17 @@ class SoyaFaceDetailerToggle_mdsoya:
 
             enhanced = vae.decode(refined_latent)  # (1, target_h, target_w, 3)
 
-            # 6. Resize back to original crop size
-            enhanced_pil = PILImage.fromarray(
-                (enhanced[0].cpu().numpy().clip(0, 1) * 255).astype(np.uint8)
-            )
-            enhanced_pil = enhanced_pil.resize((crop_w, crop_h), PILImage.LANCZOS)
-            enhanced_crop = torch.from_numpy(
-                np.array(enhanced_pil).astype(np.float32) / 255.0
-            )
+            # 6. Resize enhanced image back on GPU (no PIL)
+            enhanced_4d = enhanced[0].permute(2, 0, 1).unsqueeze(0)
+            enhanced_4d = F.interpolate(enhanced_4d, size=(crop_h, crop_w), mode='bicubic', align_corners=False)
+            enhanced_crop = enhanced_4d.squeeze(0).permute(1, 2, 0).clamp(0, 1)
 
-            # Resize mask back too
-            mask_pil = PILImage.fromarray((mask.numpy() * 255).astype(np.uint8))
-            mask_pil = mask_pil.resize((crop_w, crop_h), PILImage.LANCZOS)
-            mask_resized = torch.from_numpy(
-                np.array(mask_pil).astype(np.float32) / 255.0
-            )
+            # Resize mask back on GPU (no PIL)
+            mask_4d = mask.unsqueeze(0).unsqueeze(0)
+            mask_4d = F.interpolate(mask_4d, size=(crop_h, crop_w), mode='bilinear', align_corners=False)
+            mask_resized = mask_4d.squeeze(0).squeeze(0)
 
-            # 7. Paste back with feather mask
+            # 7. Paste back with feather mask (all on same device)
             alpha = mask_resized.unsqueeze(-1)  # (crop_h, crop_w, 1)
             result[0, cy1:cy2, cx1:cx2] = (
                 alpha * enhanced_crop + (1 - alpha) * result[0, cy1:cy2, cx1:cx2]
@@ -239,6 +228,33 @@ class SoyaFaceDetailerToggle_mdsoya:
             )
 
         return result, full_mask
+
+    # ------------------------------------------------------------------
+    # GPU Gaussian blur (replaces scipy.ndimage.gaussian_filter)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _gaussian_blur_gpu(mask, sigma):
+        """Gaussian blur using separable convolution — no CPU transfer."""
+        ksize = int(6 * sigma + 1)
+        if ksize % 2 == 0:
+            ksize += 1
+
+        x = torch.arange(ksize, dtype=torch.float32, device=mask.device) - ksize // 2
+        kernel = torch.exp(-x ** 2 / (2 * sigma ** 2))
+        kernel = kernel / kernel.sum()
+
+        mask_4d = mask.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+        pad = ksize // 2
+
+        # Horizontal pass
+        padded = F.pad(mask_4d, [pad, pad, 0, 0], mode='reflect')
+        blurred = F.conv2d(padded, kernel.view(1, 1, 1, -1))
+
+        # Vertical pass
+        padded = F.pad(blurred, [0, 0, pad, pad], mode='reflect')
+        blurred = F.conv2d(padded, kernel.view(1, 1, -1, 1))
+
+        return blurred.squeeze(0).squeeze(0)
 
     # ------------------------------------------------------------------
     # YOLO face detection
