@@ -5,8 +5,7 @@ import json
 try:
     from impact.core import SEG
 except ImportError:
-    from collections import namedtuple
-    SEG = namedtuple("SEG", ['cropped_image', 'cropped_mask', 'confidence', 'crop_region', 'bbox', 'label', 'control_net_wrapper'], defaults=[None])
+    SEG = None
 
 
 class ConditionalImageSegsSwitch_mdsoya:
