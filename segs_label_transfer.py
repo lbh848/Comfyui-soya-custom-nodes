@@ -1,5 +1,9 @@
 import torch
-from impact.core import SEG
+
+try:
+    from impact.core import SEG
+except ImportError:
+    SEG = None
 
 
 class SegsLabelTransfer_mdsoya:
@@ -17,6 +21,7 @@ class SegsLabelTransfer_mdsoya:
     CATEGORY = "Soya/SEGS"
 
     def doit(self, original_segs, modified_segs):
+        from impact.core import SEG
         orig_size, orig_segs = original_segs
         mod_size, mod_segs = modified_segs
 
