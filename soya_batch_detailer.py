@@ -6,6 +6,7 @@ batch KSampler calls (max 2 per batch) while Level 0 faces are processed
 individually. Uses Collector's batch_groups context to determine grouping.
 """
 
+import gc
 import re
 import time
 import torch
@@ -116,16 +117,21 @@ class SoyaBatchDetailer_mdsoya:
         info_lines.append(f"Iterations: {iterations}")
 
         # Encode shared negative prompt
+        _t = time.time()
         negative_cond = self._encode_conditioning(clip, negative_prompt)
+        print(f"[BENCH] negative cond encode: {time.time() - _t:.3f}s")
 
         # Step 3: Cache positive conditionings (prompts don't change between iterations)
+        _t = time.time()
         positive_conds_cache = []
         for seg in segs_list:
             prompt_text = prompt_map.get(seg.label, "")
             cond = self._encode_conditioning(clip, prompt_text)
             positive_conds_cache.append(cond)
+        print(f"[BENCH] positive cond encode ({len(segs_list)} faces): {time.time() - _t:.3f}s")
 
         # Step 3.5: Build gradient masks and apply color adjustment BEFORE KSampler
+        _t = time.time()
         crop_grad_masks = []
 
         for i, seg in enumerate(segs_list):
@@ -174,6 +180,7 @@ class SoyaBatchDetailer_mdsoya:
 
         # Save original crops for before-preview, then apply color adjustment
         original_crops_for_preview = [seg.cropped_image.clone() for seg in segs_list]
+        print(f"[BENCH] gradient masks (distance transform x{len(segs_list)}): {time.time() - _t:.3f}s")
 
         if color_adjust_enabled:
             has_color_change = (
@@ -191,78 +198,11 @@ class SoyaBatchDetailer_mdsoya:
                     if enh.shape[-1] == 4:
                         enh = enh[:, :, :, :3]
 
-                    crop_mask = crop_grad_masks[i]
-                    if isinstance(crop_mask, torch.Tensor):
-                        crop_mask = crop_mask.numpy()
-                    mask_3ch = crop_mask[:, :, np.newaxis]
-
-                    color = enh[0].cpu().numpy().astype(np.float32)
-
-                    t = color_temperature * 0.01
-                    if t != 0:
-                        color[:, :, 0] += crop_mask * t * 0.3
-                        color[:, :, 2] -= crop_mask * t * 0.3
-
-                    ti = color_tint * 0.01
-                    if ti != 0:
-                        color[:, :, 1] += crop_mask * ti * 0.3
-                        color[:, :, 0] -= crop_mask * ti * 0.15
-                        color[:, :, 2] -= crop_mask * ti * 0.15
-
-                    color = color.clip(0.0, 1.0)
-
-                    v = color_vibrance * 0.01
-                    if v != 0:
-                        r_ch, g_ch, b_ch = color[:,:,0], color[:,:,1], color[:,:,2]
-                        maxC = np.maximum(np.maximum(r_ch, g_ch), b_ch)
-                        minC = np.minimum(np.minimum(r_ch, g_ch), b_ch)
-                        sat = maxC - minC
-                        luma_w = np.array([0.299, 0.587, 0.114], dtype=np.float32)
-                        gray = (color * luma_w).sum(axis=-1)
-
-                        if v < 0:
-                            gray3 = np.broadcast_to(gray[:,:,np.newaxis], color.shape).copy()
-                            adjusted = gray3 + (1.0 + v) * (color - gray3)
-                        else:
-                            vibranceAmt = v * (1.0 - sat)
-                            isWarmTone = ((b_ch <= g_ch) & (g_ch <= r_ch)).astype(np.float32)
-                            warmth = (r_ch - b_ch) / np.maximum(maxC, 1e-4)
-                            skinTone = isWarmTone * warmth * sat * (1.0 - sat)
-                            vibranceAmt = vibranceAmt * (1.0 - skinTone * 0.5)
-                            gray3 = np.broadcast_to(gray[:,:,np.newaxis], color.shape).copy()
-                            adjusted = gray3 + (1.0 + vibranceAmt[:,:,np.newaxis] * 2.0) * (color - gray3)
-
-                        color = mask_3ch * adjusted + (1 - mask_3ch) * color
-
-                    s = color_saturation * 0.01
-                    if s != 0:
-                        luma_w = np.array([0.299, 0.587, 0.114], dtype=np.float32)
-                        gray = (color * luma_w).sum(axis=-1, keepdims=True)
-                        satMix = 1.0 + (s if s < 0 else s * 2.0)
-                        adjusted = gray + satMix * (color - gray)
-                        color = mask_3ch * adjusted + (1 - mask_3ch) * color
-
-                    # Brightness (ColorCorrect style: factor-based)
-                    b = color_brightness / 100.0
-                    if b != 0:
-                        bright_factor = 1.0 + b
-                        brightened = np.power(color, 1.0 / max(bright_factor, 0.01))
-                        color = mask_3ch * brightened + (1 - mask_3ch) * color
-
-                    # Contrast (ColorCorrect style: factor-based)
-                    c = color_contrast / 100.0
-                    if c != 0:
-                        contrast_factor = 1.0 + c
-                        mean_val = color.mean()
-                        contrasted = mean_val + contrast_factor * (color - mean_val)
-                        color = mask_3ch * contrasted + (1 - mask_3ch) * color
-
-                    # Gamma (ColorCorrect style: power function)
-                    if color_gamma != 1.0:
-                        gamma_corrected = np.clip(np.power(color, color_gamma), 0.0, 1.0)
-                        color = mask_3ch * gamma_corrected + (1 - mask_3ch) * color
-
-                    result = torch.from_numpy(color.clip(0.0, 1.0).astype(np.float32)).unsqueeze(0)
+                    result = self._apply_color_adjust_gpu(
+                        enh, crop_grad_masks[i],
+                        color_temperature, color_tint, color_saturation,
+                        color_vibrance, color_brightness, color_contrast, color_gamma,
+                    )
 
                     # Update seg with color-adjusted crop (will be VAE-encoded for KSampler)
                     segs_list[i] = SEG(
@@ -279,18 +219,35 @@ class SoyaBatchDetailer_mdsoya:
             info_lines.append("Color adjustment: disabled")
 
         # Build previews of original (before) and color-adjusted (after KSampler input) crops
+        _t = time.time()
         before_color_adjusted_preview = self._build_enhanced_preview_from_crops(
             original_crops_for_preview)
         color_adjusted_preview = self._build_enhanced_preview_from_crops(
             [seg.cropped_image for seg in segs_list])
+        print(f"[BENCH] pre-ksampler previews: {time.time() - _t:.3f}s")
 
-        # Step 4: VAE encode (color-adjusted) cropped images → latents
-        working_latents = []
-        for seg in segs_list:
-            latent = vae.encode(seg.cropped_image[:, :, :, :3])
-            working_latents.append(latent)
+        # Step 4: VAE encode (color-adjusted) cropped images → latents (batched)
+        _t = time.time()
+        import comfy.model_management as _mm
+        # Load VAE alongside model — both fit in VRAM (4.3GB free, VAE ~200MB).
+        # This prevents vae.encode() from swapping out the SD model.
+        _t_pre = time.time()
+        _mm.load_models_gpu([model, vae.patcher])
+        print(f"[BENCH] VAE encode preload (model+VAE): {time.time() - _t_pre:.3f}s")
+        _encode_groups = {}
+        for i, seg in enumerate(segs_list):
+            key = (seg.cropped_image.shape[1], seg.cropped_image.shape[2])
+            _encode_groups.setdefault(key, []).append(i)
+        working_latents = [None] * len(segs_list)
+        for indices in _encode_groups.values():
+            batch = torch.cat([segs_list[j].cropped_image[:, :, :, :3] for j in indices], dim=0)
+            latents = vae.encode(batch)
+            for k, idx in enumerate(indices):
+                working_latents[idx] = latents[k:k + 1]
+        print(f"[BENCH] VAE encode: {time.time() - _t:.3f}s")
 
         # Step 5: Cache noise masks per group + store for visualization
+        _t = time.time()
         group_masks = []
         individual_masks_viz = [None] * len(segs_list)
         original_masks_viz = [None] * len(segs_list)
@@ -324,8 +281,10 @@ class SoyaBatchDetailer_mdsoya:
                     individual_masks_viz[idx] = m.clone()
                 mask_tensor = torch.cat(masks, dim=0)
             group_masks.append(mask_tensor)
+        print(f"[BENCH] noise masks: {time.time() - _t:.3f}s")
 
         # Step 6: Iteration loop – KSampler only, no encode/decode
+        _t = time.time()
         for iteration in range(iterations):
             iter_t0 = time.time()
 
@@ -354,14 +313,30 @@ class SoyaBatchDetailer_mdsoya:
             info_lines.append(f"  Iteration {iteration + 1}/{iterations}: {iter_elapsed:.2f}\ucd08")
 
         info_lines.append(f"Sampling completed for {len(segs_list)} faces")
+        print(f"[BENCH] KSampler ({iterations} iter, {len(segs_list)} faces): {time.time() - _t:.3f}s")
 
-        # Step 7: VAE decode final latents → images (once)
+        # Step 7: VAE decode final latents → images (batched)
+        _t = time.time()
+        # Reload VAE alongside model (KSampler may have offloaded VAE)
+        _t_pre = time.time()
+        _mm.load_models_gpu([model, vae.patcher])
+        print(f"[BENCH] VAE decode preload (model+VAE): {time.time() - _t_pre:.3f}s")
+        _decode_groups = {}
+        for i in range(len(segs_list)):
+            wl = working_latents[i]
+            key = (wl.shape[2], wl.shape[3])
+            _decode_groups.setdefault(key, []).append(i)
+        decoded = [None] * len(segs_list)
+        for indices in _decode_groups.values():
+            batch = torch.cat([working_latents[j] for j in indices], dim=0)
+            images = vae.decode(batch)
+            for k, idx in enumerate(indices):
+                decoded[idx] = images[k:k + 1]
+        print(f"[BENCH] VAE decode: {time.time() - _t:.3f}s")
         updated_segs = []
         for i, seg in enumerate(segs_list):
-            enhanced_image = vae.decode(working_latents[i])
-
             new_seg = SEG(
-                cropped_image=enhanced_image,
+                cropped_image=decoded[i],
                 cropped_mask=seg.cropped_mask,
                 confidence=seg.confidence,
                 crop_region=seg.crop_region,
@@ -371,9 +346,13 @@ class SoyaBatchDetailer_mdsoya:
             updated_segs.append(new_seg)
 
         # Build enhanced preview (KSampler output)
+        print(f"[BENCH] VAE decode: {time.time() - _t:.3f}s")
+        _t = time.time()
         enhanced_preview = self._build_enhanced_preview(updated_segs)
+        print(f"[BENCH] enhanced preview: {time.time() - _t:.3f}s")
 
         # Step 7.5: Post-enhancement color adjustment (after KSampler, before eyebrow)
+        _t = time.time()
         if post_color_adjustment is None:
             post_color_adjustment = {
                 "enabled": False, "temperature": 0, "tint": 0,
@@ -442,75 +421,11 @@ class SoyaBatchDetailer_mdsoya:
                     if enh.shape[-1] == 4:
                         enh = enh[:, :, :, :3]
 
-                    crop_mask = post_crop_grad_masks[i].numpy()
-                    mask_3ch = crop_mask[:, :, np.newaxis]
-                    color = enh[0].cpu().numpy().astype(np.float32)
-
-                    t = post_ca_temperature * 0.01
-                    if t != 0:
-                        color[:, :, 0] += crop_mask * t * 0.3
-                        color[:, :, 2] -= crop_mask * t * 0.3
-
-                    ti = post_ca_tint * 0.01
-                    if ti != 0:
-                        color[:, :, 1] += crop_mask * ti * 0.3
-                        color[:, :, 0] -= crop_mask * ti * 0.15
-                        color[:, :, 2] -= crop_mask * ti * 0.15
-
-                    color = color.clip(0.0, 1.0)
-
-                    v = post_ca_vibrance * 0.01
-                    if v != 0:
-                        r_ch, g_ch, b_ch = color[:,:,0], color[:,:,1], color[:,:,2]
-                        maxC = np.maximum(np.maximum(r_ch, g_ch), b_ch)
-                        minC = np.minimum(np.minimum(r_ch, g_ch), b_ch)
-                        sat = maxC - minC
-                        luma_w = np.array([0.299, 0.587, 0.114], dtype=np.float32)
-                        gray = (color * luma_w).sum(axis=-1)
-
-                        if v < 0:
-                            gray3 = np.broadcast_to(gray[:,:,np.newaxis], color.shape).copy()
-                            adjusted = gray3 + (1.0 + v) * (color - gray3)
-                        else:
-                            vibranceAmt = v * (1.0 - sat)
-                            isWarmTone = ((b_ch <= g_ch) & (g_ch <= r_ch)).astype(np.float32)
-                            warmth = (r_ch - b_ch) / np.maximum(maxC, 1e-4)
-                            skinTone = isWarmTone * warmth * sat * (1.0 - sat)
-                            vibranceAmt = vibranceAmt * (1.0 - skinTone * 0.5)
-                            gray3 = np.broadcast_to(gray[:,:,np.newaxis], color.shape).copy()
-                            adjusted = gray3 + (1.0 + vibranceAmt[:,:,np.newaxis] * 2.0) * (color - gray3)
-
-                        color = mask_3ch * adjusted + (1 - mask_3ch) * color
-
-                    s = post_ca_saturation * 0.01
-                    if s != 0:
-                        luma_w = np.array([0.299, 0.587, 0.114], dtype=np.float32)
-                        gray = (color * luma_w).sum(axis=-1, keepdims=True)
-                        satMix = 1.0 + (s if s < 0 else s * 2.0)
-                        adjusted = gray + satMix * (color - gray)
-                        color = mask_3ch * adjusted + (1 - mask_3ch) * color
-
-                    # Brightness (ColorCorrect style)
-                    b = post_ca_brightness / 100.0
-                    if b != 0:
-                        bright_factor = 1.0 + b
-                        brightened = np.power(color, 1.0 / max(bright_factor, 0.01))
-                        color = mask_3ch * brightened + (1 - mask_3ch) * color
-
-                    # Contrast (ColorCorrect style)
-                    c = post_ca_contrast / 100.0
-                    if c != 0:
-                        contrast_factor = 1.0 + c
-                        mean_val = color.mean()
-                        contrasted = mean_val + contrast_factor * (color - mean_val)
-                        color = mask_3ch * contrasted + (1 - mask_3ch) * color
-
-                    # Gamma (ColorCorrect style: power function)
-                    if post_ca_gamma != 1.0:
-                        gamma_corrected = np.clip(np.power(color, post_ca_gamma), 0.0, 1.0)
-                        color = mask_3ch * gamma_corrected + (1 - mask_3ch) * color
-
-                    result = torch.from_numpy(color.clip(0.0, 1.0).astype(np.float32)).unsqueeze(0)
+                    result = self._apply_color_adjust_gpu(
+                        enh, post_crop_grad_masks[i],
+                        post_ca_temperature, post_ca_tint, post_ca_saturation,
+                        post_ca_vibrance, post_ca_brightness, post_ca_contrast, post_ca_gamma,
+                    )
 
                     updated_segs[i] = SEG(
                         cropped_image=result,
@@ -524,8 +439,10 @@ class SoyaBatchDetailer_mdsoya:
                 info_lines.append("Post-enhancement color adjust enabled but all values are 0")
         else:
             info_lines.append("Post-enhancement color adjust: disabled")
+        print(f"[BENCH] post-color adjustment: {time.time() - _t:.3f}s")
 
         # Build post color mask batch (pad to max size, same as pre-enhancement masks)
+        _t = time.time()
         if post_crop_grad_masks:
             post_max_h = max(m.shape[0] for m in post_crop_grad_masks)
             post_max_w = max(m.shape[1] for m in post_crop_grad_masks)
@@ -541,12 +458,15 @@ class SoyaBatchDetailer_mdsoya:
 
         post_color_adjusted_preview = self._build_enhanced_preview_from_crops(
             [seg.cropped_image for seg in updated_segs])
+        print(f"[BENCH] post previews + color masks: {time.time() - _t:.3f}s")
 
         # Step 7.6: Build eyebrow mask overlay on enhanced crops
+        _t = time.time()
         eyebrow_overlay = self._build_eyebrow_overlay_preview(updated_segs, context)
 
         # Step 7.7: Build tightly cropped eyebrow regions
         eyebrow_crop = self._build_eyebrow_crop_preview(updated_segs, context)
+        print(f"[BENCH] eyebrow previews (overlay+crop): {time.time() - _t:.3f}s")
 
         # Read eyebrow patch settings from context (set via web settings page)
         eyebrow_restore = context.get("eyebrow_restore", False)
@@ -557,22 +477,28 @@ class SoyaBatchDetailer_mdsoya:
         eyebrow_opacity = context.get("eyebrow_opacity", 0.0)
 
         # Step 7.8: Restore eyebrow color: blur original eyebrow → extract H,S + V from enhanced
+        _t = time.time()
         if eyebrow_restore:
             self._apply_eyebrow_hsv_restore(updated_segs, context, eyebrow_restore_mode, eyebrow_blur, eyebrow_hs_percentile, eyebrow_v_range)
 
         # Step 7.9: Build blur result preview (blurred eyebrow crop)
         eyebrow_blur_result = self._build_eyebrow_blur_preview(updated_segs, context, eyebrow_blur)
+        print(f"[BENCH] eyebrow restore + blur preview: {time.time() - _t:.3f}s")
 
         # Step 8: Paste-back (hole-punch + fill + eyebrow opacity)
+        _t = time.time()
         result_image = self._paste_back(image, updated_segs, context, eyebrow_opacity)
+        print(f"[BENCH] paste-back: {time.time() - _t:.3f}s")
 
         elapsed = time.time() - t0
         info_lines.append(f"Total: {elapsed:.2f}\ucd08")
 
         # Save detailer results to config for web UI
+        _t = time.time()
         self._save_detailer_result(updated_segs, batch_groups, segs_list, elapsed, iterations,
                                    individual_masks_viz, original_masks_viz,
                                    edge_blur, edge_feather)
+        print(f"[BENCH] save result to config: {time.time() - _t:.3f}s")
 
         return (result_image, (segs[0], updated_segs), "\n".join(info_lines), before_color_adjusted_preview, color_mask_batch, color_adjusted_preview, enhanced_preview, post_color_mask_batch, post_color_adjusted_preview, eyebrow_overlay, eyebrow_crop, eyebrow_blur_result)
 
@@ -1286,6 +1212,8 @@ class SoyaBatchDetailer_mdsoya:
 
             original_crop = kept_faces[i]["image"]  # (1, H, W, 3) from collector
             eb_mask = kept_faces[i]["eyebrow_mask"]  # (H_mask, W_mask) float32
+            if isinstance(eb_mask, np.ndarray):
+                eb_mask = torch.from_numpy(eb_mask).float()
             threshold = kept_faces[i].get("eyebrow_threshold", 0.5)
 
             # Resize original crop to match enhanced dimensions
@@ -1299,12 +1227,11 @@ class SoyaBatchDetailer_mdsoya:
             # Resize mask to match enhanced dimensions (GPU)
             mask_h, mask_w = eb_mask.shape[:2]
             if mask_h != enh_h or mask_w != enh_w:
-                eb_mask_t = torch.from_numpy(eb_mask).float() if isinstance(eb_mask, np.ndarray) else eb_mask.float()
-                eb_mask = SoyaBatchDetailer_mdsoya._resize_2d_gpu(eb_mask_t, enh_h, enh_w)
+                eb_mask = SoyaBatchDetailer_mdsoya._resize_2d_gpu(eb_mask, enh_h, enh_w)
 
             # Binary mask from threshold → keep only eyebrow pixels
             binary = (eb_mask > threshold).float()
-            mask_3ch = binary.unsqueeze(-1) if isinstance(binary, torch.Tensor) else torch.from_numpy(binary.unsqueeze(-1))
+            mask_3ch = binary.unsqueeze(-1)
             masked = original_crop[0] * mask_3ch  # (H, W, 3)
 
             # Same resize as enhanced: 512 width, using enhanced dimensions
@@ -1340,6 +1267,8 @@ class SoyaBatchDetailer_mdsoya:
             enh_h, enh_w = seg.cropped_image.shape[1], seg.cropped_image.shape[2]
             original_crop = kept_faces[i]["image"]
             eb_mask = kept_faces[i]["eyebrow_mask"]
+            if isinstance(eb_mask, np.ndarray):
+                eb_mask = torch.from_numpy(eb_mask).float()
             threshold = kept_faces[i].get("eyebrow_threshold", 0.5)
 
             # Resize original to match enhanced
@@ -1353,8 +1282,7 @@ class SoyaBatchDetailer_mdsoya:
             # Resize mask to match enhanced (GPU)
             mask_h, mask_w = eb_mask.shape[:2]
             if mask_h != enh_h or mask_w != enh_w:
-                eb_mask_t = torch.from_numpy(eb_mask).float() if isinstance(eb_mask, np.ndarray) else eb_mask.float()
-                eb_mask = SoyaBatchDetailer_mdsoya._resize_2d_gpu(eb_mask_t, enh_h, enh_h)
+                eb_mask = SoyaBatchDetailer_mdsoya._resize_2d_gpu(eb_mask, enh_h, enh_w)
 
             # Blur original eyebrow pixels (GPU)
             orig_t = original_crop[0].permute(2, 0, 1)  # (3, H, W)
@@ -1365,8 +1293,6 @@ class SoyaBatchDetailer_mdsoya:
 
             # Apply binary mask → only eyebrow pixels visible
             binary = (eb_mask > threshold).float()
-            if isinstance(binary, np.ndarray):
-                binary = torch.from_numpy(binary)
             mask_3ch = binary.unsqueeze(-1)
             masked = blurred * mask_3ch
 
@@ -1505,17 +1431,92 @@ class SoyaBatchDetailer_mdsoya:
 
     @staticmethod
     def _distance_transform_gpu(binary_mask):
-        """GPU distance transform via iterative erosion (Manhattan approx.)."""
-        h, w = binary_mask.shape
-        mask_4d = binary_mask.float().unsqueeze(0).unsqueeze(0)
-        dist = torch.zeros(1, 1, h, w, dtype=torch.float32, device=binary_mask.device)
-        remaining = mask_4d.clone()
-        for d in range(1, max(h, w) + 1):
-            eroded = -F.max_pool2d(-remaining, 3, stride=1, padding=1)
-            eroded = (eroded > 0.5).float()
-            boundary = remaining - eroded
-            dist += boundary * d
-            remaining = eroded
-            if remaining.sum() < 0.5:
-                break
-        return dist.squeeze(0).squeeze(0)
+        """Distance transform via scipy EDT (single-pass O(n), replaces iterative erosion)."""
+        from scipy.ndimage import distance_transform_edt
+        mask_np = binary_mask.cpu().numpy() if isinstance(binary_mask, torch.Tensor) else binary_mask
+        dist = distance_transform_edt(mask_np > 0.5).astype(np.float32)
+        return torch.from_numpy(dist).to(binary_mask.device)
+
+    @staticmethod
+    def _apply_color_adjust_gpu(image, mask, temperature=0, tint=0, saturation=0,
+                                vibrance=0, brightness=0, contrast=0, gamma=1.0):
+        """Apply color adjustment using torch GPU operations (no CPU transfer).
+
+        Args:
+            image: (1, H, W, 3) float32 tensor
+            mask: (H, W) float32 tensor – gradient mask for blending
+        Returns:
+            (1, H, W, 3) float32 tensor
+        """
+        color = image[0].clone()  # (H, W, 3)
+        m = mask.unsqueeze(-1)    # (H, W, 1)
+
+        # Temperature
+        t = temperature * 0.01
+        if t != 0:
+            color[..., 0] = color[..., 0] + m[..., 0] * t * 0.3
+            color[..., 2] = color[..., 2] - m[..., 0] * t * 0.3
+            color = color.clamp(0.0, 1.0)
+
+        # Tint
+        ti = tint * 0.01
+        if ti != 0:
+            color[..., 1] = color[..., 1] + m[..., 0] * ti * 0.3
+            color[..., 0] = color[..., 0] - m[..., 0] * ti * 0.15
+            color[..., 2] = color[..., 2] - m[..., 0] * ti * 0.15
+            color = color.clamp(0.0, 1.0)
+
+        # Vibrance
+        v = vibrance * 0.01
+        if v != 0:
+            r_ch, g_ch, b_ch = color[..., 0], color[..., 1], color[..., 2]
+            maxC = torch.maximum(torch.maximum(r_ch, g_ch), b_ch)
+            minC = torch.minimum(torch.minimum(r_ch, g_ch), b_ch)
+            sat = maxC - minC
+            luma_w = color.new_tensor([0.299, 0.587, 0.114])
+            gray = (color * luma_w).sum(dim=-1)
+
+            if v < 0:
+                gray3 = gray.unsqueeze(-1).expand_as(color)
+                adjusted = gray3 + (1.0 + v) * (color - gray3)
+            else:
+                vibranceAmt = v * (1.0 - sat)
+                isWarmTone = ((b_ch <= g_ch) & (g_ch <= r_ch)).float()
+                warmth = (r_ch - b_ch) / torch.clamp(maxC, min=1e-4)
+                skinTone = isWarmTone * warmth * sat * (1.0 - sat)
+                vibranceAmt = vibranceAmt * (1.0 - skinTone * 0.5)
+                gray3 = gray.unsqueeze(-1).expand_as(color)
+                adjusted = gray3 + (1.0 + vibranceAmt.unsqueeze(-1) * 2.0) * (color - gray3)
+
+            color = m * adjusted + (1 - m) * color
+
+        # Saturation
+        s = saturation * 0.01
+        if s != 0:
+            luma_w = color.new_tensor([0.299, 0.587, 0.114])
+            gray = (color * luma_w).sum(dim=-1, keepdim=True)
+            satMix = 1.0 + (s if s < 0 else s * 2.0)
+            adjusted = gray + satMix * (color - gray)
+            color = m * adjusted + (1 - m) * color
+
+        # Brightness
+        b = brightness / 100.0
+        if b != 0:
+            bright_factor = 1.0 + b
+            brightened = torch.pow(color.clamp(min=1e-6), 1.0 / max(bright_factor, 0.01))
+            color = m * brightened + (1 - m) * color
+
+        # Contrast
+        c = contrast / 100.0
+        if c != 0:
+            contrast_factor = 1.0 + c
+            mean_val = color.mean()
+            contrasted = mean_val + contrast_factor * (color - mean_val)
+            color = m * contrasted + (1 - m) * color
+
+        # Gamma
+        if gamma != 1.0:
+            gamma_corrected = torch.pow(color.clamp(min=1e-6), gamma).clamp(0.0, 1.0)
+            color = m * gamma_corrected + (1 - m) * color
+
+        return color.clamp(0.0, 1.0).unsqueeze(0)
