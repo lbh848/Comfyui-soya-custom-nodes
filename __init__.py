@@ -123,6 +123,9 @@ __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
 
 WEB_DIRECTORY = "./soya_scheduler/web"
 
+# Soya Model Manager – web extension
+from .soya_model_manager import WEB_DIRECTORY as _mm_web  # noqa: F401
+
 # Set up API routes
 try:
     from .soya_scheduler.server import setup_routes
