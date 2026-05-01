@@ -277,11 +277,11 @@ class SoyaFaceIDYoloFallback_mdsoya:
                 IPAdapter, set_model_patch_replace,
             )
             from ComfyUI_IPAdapter_plus.utils import encode_image_masked
-        except ImportError as e:
-            raise ImportError(
-                f"ComfyUI_IPAdapter_plus import failed: {e}. "
-                "Install from: https://github.com/cubiq/ComfyUI_IPAdapter_plus"
+        except ImportError:
+            from comfyui_ipadapter_plus.IPAdapterPlus import (
+                IPAdapter, set_model_patch_replace,
             )
+            from comfyui_ipadapter_plus.utils import encode_image_masked
 
         # Clear stale attn2 patches
         transformer_options = model.model_options.setdefault("transformer_options", {})
