@@ -1,10 +1,9 @@
 import torch
-from collections import namedtuple
 
 try:
     from impact.core import SEG
 except ImportError:
-    SEG = namedtuple("SEG", ['cropped_image', 'cropped_mask', 'confidence', 'crop_region', 'bbox', 'label', 'control_net_wrapper'], defaults=[None])
+    SEG = None
 
 
 class SegsLabelTransfer_mdsoya:
@@ -22,6 +21,7 @@ class SegsLabelTransfer_mdsoya:
     CATEGORY = "Soya/SEGS"
 
     def doit(self, original_segs, modified_segs):
+        from impact.core import SEG
         orig_size, orig_segs = original_segs
         mod_size, mod_segs = modified_segs
 
