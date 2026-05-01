@@ -1,6 +1,6 @@
 from .sort_batch_by_segs import SortBatchBySegsBBox_mdsoya
 from .character_identifier import IdentifyCharacters_mdsoya
-from .mask_bitwise import MaskBitwiseAnd_mdsoya, MaskBitwiseOr_mdsoya, MaskBitwiseAndBatch_mdsoya, MaskBitwiseOrBatch_mdsoya
+from .mask_bitwise import MaskBitwiseAnd_mdsoya
 from .merge_segs import MergeSegs_mdsoya
 from .mask_proportional_expand import MaskProportionalExpand_mdsoya
 from .mask_shape_expand import MaskShapeExpand_mdsoya
@@ -32,9 +32,6 @@ NODE_CLASS_MAPPINGS = {
     "SortBatchBySegsBBox_mdsoya": SortBatchBySegsBBox_mdsoya,
     "IdentifyCharacters_mdsoya": IdentifyCharacters_mdsoya,
     "MaskBitwiseAnd_mdsoya": MaskBitwiseAnd_mdsoya,
-    "MaskBitwiseOr_mdsoya": MaskBitwiseOr_mdsoya,
-    "MaskBitwiseAndBatch_mdsoya": MaskBitwiseAndBatch_mdsoya,
-    "MaskBitwiseOrBatch_mdsoya": MaskBitwiseOrBatch_mdsoya,
     "MergeSegs_mdsoya": MergeSegs_mdsoya,
     "MaskProportionalExpand_mdsoya": MaskProportionalExpand_mdsoya,
     "MaskShapeExpand_mdsoya": MaskShapeExpand_mdsoya,
@@ -67,9 +64,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SortBatchBySegsBBox_mdsoya": "Sort Batch by Segs BBox (Soya)",
     "IdentifyCharacters_mdsoya": "Identify Characters (Soya)",
     "MaskBitwiseAnd_mdsoya": "Mask Bitwise And (Soya)",
-    "MaskBitwiseOr_mdsoya": "Mask Bitwise Or (Soya)",
-    "MaskBitwiseAndBatch_mdsoya": "Mask Bitwise And Batch (Soya)",
-    "MaskBitwiseOrBatch_mdsoya": "Mask Bitwise Or Batch (Soya)",
     "MergeSegs_mdsoya": "Merge Segs (Soya)",
     "MaskProportionalExpand_mdsoya": "Mask Proportional Expand (Soya)",
     "MaskShapeExpand_mdsoya": "Mask Shape Expand (Soya)",
