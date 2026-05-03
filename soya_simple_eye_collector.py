@@ -133,8 +133,24 @@ class SoyaSimpleEyeCollector_mdsoya:
         cx2 = min(W, int(cx + ew / 2))
         cy2 = min(H, int(cy + eh / 2))
 
+        # Align crop to multiple of 4 so 2x upscale → multiple of 8 (VAE constraint).
+        # Pad outward to avoid shrinking the crop below the requested crop_factor area.
+        cw, ch = cx2 - cx1, cy2 - cy1
+        new_cw = ((cw + 3) // 4) * 4
+        new_ch = ((ch + 3) // 4) * 4
+        # Distribute extra pixels symmetrically, clamped to image bounds
+        dx = new_cw - cw
+        dy = new_ch - ch
+        cx1 = max(0, cx1 - dx // 2)
+        cy1 = max(0, cy1 - dy // 2)
+        cx2 = min(W, cx1 + new_cw)
+        cy2 = min(H, cy1 + new_ch)
+        # Re-adjust start if end hit image boundary
+        cx1 = max(0, cx2 - new_cw)
+        cy1 = max(0, cy2 - new_ch)
+
         crop_region = (cx1, cy1, cx2, cy2)
-        info_lines.append(f"Crop region (x{crop_factor}): {crop_region}")
+        info_lines.append(f"Crop region (x{crop_factor}): {crop_region} (aligned ×4)")
 
         # Crop image
         crop_np = image_np[cy1:cy2, cx1:cx2].copy()
