@@ -997,6 +997,43 @@ class SoyaBatchDetailer_mdsoya:
                       f"padding=({pad_l},{pad_t},{pad_r},{pad_b}) "
                       f"enhanced={enhanced.shape}→resized={resized.shape}")
 
+                # ── Verification: paste-back original crop (before detailer) with same algorithm ──
+                try:
+                    if kf_entry.get("image") is not None:
+                        _orig_crop = kf_entry["image"]  # (1, enh_h, enh_w, 3) before detailer
+                        _oc_h, _oc_w = _orig_crop.shape[1], _orig_crop.shape[2]
+                        _oc_resized = F.interpolate(
+                            _orig_crop.permute(0, 3, 1, 2),
+                            size=(target_h, target_w), mode='bicubic', align_corners=False,
+                        ).permute(0, 2, 3, 1)[0].clamp(0, 1)
+                        _oc_resized_f = _oc_resized.cpu().numpy()
+                        if has_padding:
+                            _oc_valid = _oc_resized_f[valid_y:valid_y+valid_h, valid_x:valid_x+valid_w]
+                            _orig_at = original_image[0, paste_y1:paste_y2,
+                                                         paste_x1:paste_x2, :].cpu().numpy()
+                        else:
+                            _oc_valid = _oc_resized_f
+                            _orig_at = original_image[0, cy1:cy1+target_h, cx1:cx1+target_w, :].cpu().numpy()
+                        _diff = np.abs(_orig_at - _oc_valid)
+                        _max_diff = _diff.max()
+                        _mean_diff = _diff.mean()
+                        _n_mismatch = int((_diff > 0.001).sum())
+                        _total_px = _diff.size
+                        print(f"[BatchDetailer VERIFY] seg[{seg_idx}] label={seg.label} "
+                              f"orig_crop=({_oc_w}x{_oc_h}) pad=({pad_l},{pad_t},{pad_r},{pad_b}) "
+                              f"paste=({paste_x1},{paste_y1}) uf={uf} "
+                              f"max_diff={_max_diff:.6f} mean_diff={_mean_diff:.6f} "
+                              f"mismatch={_n_mismatch}/{_total_px}")
+                        if _max_diff > 0.005:
+                            for _c, _cn in enumerate('RGB'):
+                                print(f"  [{_cn}] max={_diff[:,:,_c].max():.6f} mean={_diff[:,:,_c].mean():.6f}")
+                            if _diff.shape[0] > 4 and _diff.shape[1] > 4:
+                                print(f"  [EDGE] top={_diff[0,:,:].mean():.6f} bot={_diff[-1,:,:].mean():.6f} "
+                                      f"left={_diff[:,0,:].mean():.6f} right={_diff[:,-1,:].mean():.6f} "
+                                      f"center={_diff[2:-2,2:-2,:].mean():.6f}")
+                except Exception as _ve:
+                    print(f"[BatchDetailer VERIFY] seg[{seg_idx}] failed: {_ve}")
+
         # Step 5: Apply eyebrow opacity (blend eyebrow area back toward original)
         if eyebrow_opacity > 0:
             kept_faces = context.get("kept_faces", [])
