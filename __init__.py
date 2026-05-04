@@ -28,6 +28,7 @@ from .soya_passthrough import SoyaPassthrough_mdsoya
 from .soya_faceid_model_switch import SoyaFaceIDModelSwitch_mdsoya
 from .soya_ipadapter_patch_cleaner import SoyaIPAdapterPatchCleaner_mdsoya
 from .soya_hiresfix_toggle import SoyaHiresfixToggle_mdsoya
+from .soya_upscale_toggle import SoyaUpscaleToggle_mdsoya
 
 NODE_CLASS_MAPPINGS = {
     "SortBatchBySegsBBox_mdsoya": SortBatchBySegsBBox_mdsoya,
@@ -60,6 +61,7 @@ NODE_CLASS_MAPPINGS = {
     "SoyaFaceIDModelSwitch_mdsoya": SoyaFaceIDModelSwitch_mdsoya,
     "SoyaIPAdapterPatchCleaner_mdsoya": SoyaIPAdapterPatchCleaner_mdsoya,
     "SoyaHiresfixToggle_mdsoya": SoyaHiresfixToggle_mdsoya,
+    "SoyaUpscaleToggle_mdsoya": SoyaUpscaleToggle_mdsoya,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -93,6 +95,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaFaceIDModelSwitch_mdsoya": "Soya FaceID Model Switch (Soya)",
     "SoyaIPAdapterPatchCleaner_mdsoya": "IPAdapter Patch Cleaner (Soya)",
     "SoyaHiresfixToggle_mdsoya": "Hiresfix Toggle (Soya)",
+    "SoyaUpscaleToggle_mdsoya": "Upscale Toggle (Soya)",
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
