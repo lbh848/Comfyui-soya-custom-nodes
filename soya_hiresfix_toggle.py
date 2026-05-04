@@ -3,6 +3,7 @@ SoyaHiresfixToggle – Hires.fix in a single node.
 
 Pipeline (enable=true):
   upscale_model → VAE encode → KSampler → VAE decode → resize to original
+  tiled_vae: VRAM-saving option for 12GB GPUs (uses tiled encode/decode)
 
 enable=false passes the original image through.
 """
@@ -35,11 +36,14 @@ class SoyaHiresfixToggle_mdsoya:
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
                 "denoise": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "tiled_vae": ("STRING", {"default": "false"}),
+                "tile_size": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 32}),
             },
         }
 
     def doit(self, *, enable, image, model, positive, negative, vae,
-             upscale_model, seed, steps, cfg, sampler_name, scheduler, denoise):
+             upscale_model, seed, steps, cfg, sampler_name, scheduler, denoise,
+             tiled_vae, tile_size):
 
         use = enable.strip().lower() in ("true", "1", "yes")
 
@@ -47,14 +51,21 @@ class SoyaHiresfixToggle_mdsoya:
             print("[SoyaHiresfixToggle] DISABLED — bypassing")
             return (image,)
 
-        print("[SoyaHiresfixToggle] ENABLED — running hires.fix pipeline")
+        use_tiled = tiled_vae.strip().lower() in ("true", "1", "yes")
+        print(f"[SoyaHiresfixToggle] ENABLED — running hires.fix pipeline (tiled_vae={use_tiled})")
         _, orig_h, orig_w, _ = image.shape
 
         # 1. Upscale
         upscaled = self._upscale_with_model(upscale_model, image)
 
         # 2. VAE encode
-        latent = vae.encode(upscaled[:, :, :, :3])
+        if use_tiled:
+            latent = vae.encode_tiled(
+                upscaled[:, :, :, :3],
+                tile_x=tile_size, tile_y=tile_size, overlap=tile_size // 8,
+            )
+        else:
+            latent = vae.encode(upscaled[:, :, :, :3])
         latent_dict = {"samples": latent}
 
         # 3. KSampler
@@ -67,7 +78,16 @@ class SoyaHiresfixToggle_mdsoya:
         sampled = result[0]["samples"]
 
         # 4. VAE decode
-        decoded = vae.decode(sampled)
+        if use_tiled:
+            compression = vae.spacial_compression_decode()
+            decoded = vae.decode_tiled(
+                sampled,
+                tile_x=tile_size // compression,
+                tile_y=tile_size // compression,
+                overlap=tile_size // compression // 8,
+            )
+        else:
+            decoded = vae.decode(sampled)
 
         # 5. Resize back to original dimensions
         if decoded.shape[1] != orig_h or decoded.shape[2] != orig_w:
