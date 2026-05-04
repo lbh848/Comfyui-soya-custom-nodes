@@ -9,8 +9,8 @@ import torch
 
 
 class SoyaUpscaleToggle_mdsoya:
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("image",)
+    RETURN_TYPES = ("IMAGE", "INT", "INT")
+    RETURN_NAMES = ("image", "original_width", "original_height")
     FUNCTION = "doit"
     CATEGORY = "Soya"
 
@@ -26,13 +26,14 @@ class SoyaUpscaleToggle_mdsoya:
 
     def doit(self, *, enable, image, upscale_model):
         use = enable.strip().lower() in ("true", "1", "yes")
+        _, orig_h, orig_w, _ = image.shape
 
         if not use:
             print("[SoyaUpscaleToggle] DISABLED — bypassing")
-            return (image,)
+            return (image, orig_w, orig_h)
 
         print("[SoyaUpscaleToggle] ENABLED — upscaling")
-        return (self._upscale_with_model(upscale_model, image),)
+        return (self._upscale_with_model(upscale_model, image), orig_w, orig_h)
 
     @staticmethod
     def _upscale_with_model(upscale_model, image):
