@@ -39,11 +39,15 @@ class SoyaHiresfixToggle_mdsoya:
                 "tiled_vae": ("STRING", {"default": "false"}),
                 "tile_size": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 32}),
             },
+            "optional": {
+                "target_width": ("INT", {"default": 0, "min": 0, "max": 16384}),
+                "target_height": ("INT", {"default": 0, "min": 0, "max": 16384}),
+            },
         }
 
     def doit(self, *, enable, image, model, positive, negative, vae,
              seed, steps, cfg, sampler_name, scheduler, denoise,
-             tiled_vae, tile_size):
+             tiled_vae, tile_size, target_width=0, target_height=0):
 
         use = enable.strip().lower() in ("true", "1", "yes")
 
@@ -53,7 +57,11 @@ class SoyaHiresfixToggle_mdsoya:
 
         use_tiled = tiled_vae.strip().lower() in ("true", "1", "yes")
         print(f"[SoyaHiresfixToggle] ENABLED — running hires.fix pipeline (tiled_vae={use_tiled})")
-        _, orig_h, orig_w, _ = image.shape
+
+        # Use target dimensions if provided, otherwise use input image size
+        _, img_h, img_w, _ = image.shape
+        out_h = target_height if target_height > 0 else img_h
+        out_w = target_width if target_width > 0 else img_w
 
         # 1. VAE encode
         if use_tiled:
@@ -86,13 +94,55 @@ class SoyaHiresfixToggle_mdsoya:
         else:
             decoded = vae.decode(sampled)
 
-        # 4. Resize back to original dimensions
-        if decoded.shape[1] != orig_h or decoded.shape[2] != orig_w:
-            decoded = F.interpolate(
-                decoded.movedim(-1, 1),
-                size=(orig_h, orig_w),
-                mode="bicubic",
-                align_corners=False,
-            ).movedim(1, -1)
+        # 4. Resize back to original dimensions (lanczos on GPU)
+        if decoded.shape[1] != out_h or decoded.shape[2] != out_w:
+            decoded = self._lanczos_resize(decoded, out_h, out_w)
 
         return (torch.clamp(decoded, 0.0, 1.0),)
+
+    @staticmethod
+    def _lanczos_resize(tensor, out_h, out_w):
+        """Lanczos3 resize via separable convolution on GPU."""
+        import math
+        _, in_h, in_w, ch = tensor.shape
+        img = tensor.movedim(-1, 1)  # (B, C, H, W)
+
+        a = 3  # Lanczos3
+
+        def _make_kernel(size, scale):
+            """1D Lanczos kernel."""
+            x = torch.arange(size, dtype=torch.float32) - size // 2
+            x = x * (1.0 / scale)
+            kernel = torch.where(
+                x == 0, torch.ones_like(x),
+                torch.where(
+                    torch.abs(x) < a,
+                    (a * torch.sin(math.pi * x) * torch.sin(math.pi * x / a))
+                    / (math.pi * math.pi * x * x),
+                    torch.zeros_like(x),
+                ),
+            )
+            return kernel / kernel.sum()
+
+        # Horizontal pass
+        kw = max(int(in_w / out_w * a) * 2 + 1, 3)
+        kernel_w = _make_kernel(kw, in_w / out_w).to(img.device)
+        pad = kw // 2
+        padded = F.pad(img, [pad, pad, 0, 0], mode='reflect')
+        # Apply per-channel
+        B, C, H, Wp = padded.shape
+        kh = kernel_w.view(1, 1, 1, -1).expand(C, 1, 1, -1)
+        out = F.conv2d(padded.view(B * C, 1, H, Wp), kh, groups=1)
+        out = out.view(B, C, H, -1)[:, :, :, :out_w]
+
+        # Vertical pass
+        kh_size = max(int(in_h / out_h * a) * 2 + 1, 3)
+        kernel_h = _make_kernel(kh_size, in_h / out_h).to(img.device)
+        pad = kh_size // 2
+        padded = F.pad(out, [0, 0, pad, pad], mode='reflect')
+        B, C, Hp, W = padded.shape
+        kv = kernel_h.view(1, 1, -1, 1).expand(C, 1, -1, 1)
+        out = F.conv2d(padded.view(B * C, 1, Hp, W), kv, groups=1)
+        out = out.view(B, C, -1, W)[:, :, :out_h, :]
+
+        return out.movedim(1, -1)  # (B, out_h, out_w, C)
