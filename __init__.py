@@ -18,7 +18,6 @@ from .mask_and_segs_bbox import MaskAndSegsBBox_mdsoya
 from .segs_label_transfer import SegsLabelTransfer_mdsoya
 from .soya_color_adjust_config import SoyaColorAdjustConfig_mdsoya
 from .soya_faceid_yolo_fallback import SoyaFaceIDYoloFallback_mdsoya
-from .soya_conditioning_switch import SoyaConditioningSwitch_mdsoya
 from .soya_pose_json_converter import SoyaPoseJsonConverter_mdsoya
 from .soya_string_to_float import SoyaStringToFloat_mdsoya
 from .soya_face_detailer_toggle import SoyaFaceDetailerToggle_mdsoya
@@ -29,6 +28,7 @@ from .soya_faceid_model_switch import SoyaFaceIDModelSwitch_mdsoya
 from .soya_ipadapter_patch_cleaner import SoyaIPAdapterPatchCleaner_mdsoya
 from .soya_hiresfix_toggle import SoyaHiresfixToggle_mdsoya
 from .soya_upscale_toggle import SoyaUpscaleToggle_mdsoya
+from .soya_controlnet_toggle import SoyaControlNetToggle_mdsoya
 
 NODE_CLASS_MAPPINGS = {
     "SortBatchBySegsBBox_mdsoya": SortBatchBySegsBBox_mdsoya,
@@ -51,7 +51,6 @@ NODE_CLASS_MAPPINGS = {
     "SegsLabelTransfer_mdsoya": SegsLabelTransfer_mdsoya,
     "SoyaColorAdjustConfig_mdsoya": SoyaColorAdjustConfig_mdsoya,
     "SoyaFaceIDYoloFallback_mdsoya": SoyaFaceIDYoloFallback_mdsoya,
-    "SoyaConditioningSwitch_mdsoya": SoyaConditioningSwitch_mdsoya,
     "SoyaPoseJsonConverter_mdsoya": SoyaPoseJsonConverter_mdsoya,
     "SoyaStringToFloat_mdsoya": SoyaStringToFloat_mdsoya,
     "SoyaFaceDetailerToggle_mdsoya": SoyaFaceDetailerToggle_mdsoya,
@@ -62,6 +61,7 @@ NODE_CLASS_MAPPINGS = {
     "SoyaIPAdapterPatchCleaner_mdsoya": SoyaIPAdapterPatchCleaner_mdsoya,
     "SoyaHiresfixToggle_mdsoya": SoyaHiresfixToggle_mdsoya,
     "SoyaUpscaleToggle_mdsoya": SoyaUpscaleToggle_mdsoya,
+    "SoyaControlNetToggle_mdsoya": SoyaControlNetToggle_mdsoya,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -85,7 +85,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SegsLabelTransfer_mdsoya": "SEGS Label Transfer (Soya)",
     "SoyaColorAdjustConfig_mdsoya": "Color Adjust Config (Soya)",
     "SoyaFaceIDYoloFallback_mdsoya": "Soya FaceID YOLO Fallback (Soya)",
-    "SoyaConditioningSwitch_mdsoya": "Conditioning Switch (Soya)",
     "SoyaPoseJsonConverter_mdsoya": "Pose JSON Converter (Soya)",
     "SoyaStringToFloat_mdsoya": "String to Float (Soya)",
     "SoyaFaceDetailerToggle_mdsoya": "Face Detailer Toggle (Soya)",
@@ -96,6 +95,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaIPAdapterPatchCleaner_mdsoya": "IPAdapter Patch Cleaner (Soya)",
     "SoyaHiresfixToggle_mdsoya": "Hiresfix Toggle (Soya)",
     "SoyaUpscaleToggle_mdsoya": "Upscale Toggle (Soya)",
+    "SoyaControlNetToggle_mdsoya": "ControlNet Toggle (Soya)",
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
