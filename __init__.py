@@ -31,6 +31,7 @@ from .soya_hiresfix_toggle import SoyaHiresfixToggle_mdsoya
 from .soya_upscale_toggle import SoyaUpscaleToggle_mdsoya
 from .soya_controlnet_toggle import SoyaControlNetToggle_mdsoya
 from .soya_resize_toggle import SoyaResizeToggle_mdsoya
+from .soya_ref_image_loader import SoyaRefImageLoader_mdsoya
 
 # main-only nodes (for 배포예정_삽화_V3 + ray scheduler)
 from .soya_process_divider import SoyaProcessDivider_mdsoya
@@ -74,6 +75,7 @@ NODE_CLASS_MAPPINGS = {
     "SoyaUpscaleToggle_mdsoya": SoyaUpscaleToggle_mdsoya,
     "SoyaControlNetToggle_mdsoya": SoyaControlNetToggle_mdsoya,
     "SoyaResizeToggle_mdsoya": SoyaResizeToggle_mdsoya,
+    "SoyaRefImageLoader_mdsoya": SoyaRefImageLoader_mdsoya,
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": SoyaProcessDivider_mdsoya,
     "SoyaProcessCollector_mdsoya": SoyaProcessCollector_mdsoya,
@@ -118,6 +120,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaUpscaleToggle_mdsoya": "Upscale Toggle (Soya)",
     "SoyaControlNetToggle_mdsoya": "ControlNet Toggle (Soya)",
     "SoyaResizeToggle_mdsoya": "Resize Toggle (Soya)",
+    "SoyaRefImageLoader_mdsoya": "레퍼런스이미지로드 (Soya)",
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": "Soya Process Divider (Soya)",
     "SoyaProcessCollector_mdsoya": "Soya Process Collector (Soya)",
