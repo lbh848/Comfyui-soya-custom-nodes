@@ -23,6 +23,7 @@ class SoyaTextSender_mdsoya:
         return {
             "required": {
                 "text": ("STRING", {"default": "", "multiline": True}),
+                "node_title": ("STRING", {"default": "", "multiline": False}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -36,21 +37,24 @@ class SoyaTextSender_mdsoya:
     CATEGORY = "Soya/Util"
     OUTPUT_NODE = True
 
-    def send(self, text, unique_id=None, extra_pnginfo=None):
-        node_title = None
+    def send(self, text, node_title="", unique_id=None, extra_pnginfo=None):
+        resolved_title = None
 
         if extra_pnginfo and isinstance(extra_pnginfo, dict):
             workflow = extra_pnginfo.get("workflow", {})
             for node in workflow.get("nodes", []):
                 if str(node.get("id")) == str(unique_id):
-                    node_title = node.get("title") or node.get("type", "")
+                    resolved_title = node.get("title") or node.get("type", "")
                     break
 
-        if not node_title:
-            node_title = f"TextSender_{unique_id}"
+        if not resolved_title:
+            resolved_title = node_title.strip() if node_title and node_title.strip() else None
+
+        if not resolved_title:
+            resolved_title = f"TextSender_{unique_id}"
 
         payload = {
-            "node_title": node_title,
+            "node_title": resolved_title,
             "node_id": str(unique_id) if unique_id is not None else "",
             "text": text,
         }
