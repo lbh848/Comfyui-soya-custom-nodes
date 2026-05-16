@@ -35,6 +35,7 @@ from .soya_ref_image_loader import SoyaRefImageLoader_mdsoya
 from .soya_text_sender import SoyaTextSender_mdsoya
 from .soya_float_to_int import SoyaFloatToInt_mdsoya
 from .soya_multiply import SoyaMultiply_mdsoya
+from .soya_strip_extension import SoyaStripExtension_mdsoya
 
 # main-only nodes (for 배포예정_삽화_V3 + ray scheduler)
 from .soya_process_divider import SoyaProcessDivider_mdsoya
@@ -82,6 +83,7 @@ NODE_CLASS_MAPPINGS = {
     "SoyaTextSender_mdsoya": SoyaTextSender_mdsoya,
     "SoyaFloatToInt_mdsoya": SoyaFloatToInt_mdsoya,
     "SoyaMultiply_mdsoya": SoyaMultiply_mdsoya,
+    "SoyaStripExtension_mdsoya": SoyaStripExtension_mdsoya,
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": SoyaProcessDivider_mdsoya,
     "SoyaProcessCollector_mdsoya": SoyaProcessCollector_mdsoya,
@@ -130,6 +132,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaTextSender_mdsoya": "Text Sender (Soya)",
     "SoyaFloatToInt_mdsoya": "Float to Int (Soya)",
     "SoyaMultiply_mdsoya": "Multiply (Soya)",
+    "SoyaStripExtension_mdsoya": "Strip Extension (Soya)",
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": "Soya Process Divider (Soya)",
     "SoyaProcessCollector_mdsoya": "Soya Process Collector (Soya)",

@@ -38,7 +38,7 @@ class LoadImagesFromPath_mdsoya:
     def load_images(self, path):
         path = path.strip()
         if not os.path.isabs(path):
-            input_dir = folder_paths.get_directory_names().get("input", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "input"))
+            input_dir = folder_paths.get_input_directory()
             path = os.path.join(input_dir, path)
         if not os.path.isdir(path):
             raise ValueError(f"Directory not found: {path}")
