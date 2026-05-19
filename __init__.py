@@ -39,6 +39,8 @@ from .soya_strip_extension import SoyaStripExtension_mdsoya
 from .soya_short_side import SoyaShortSide_mdsoya
 from .soya_to_string import SoyaToString_mdsoya
 from .soya_wd14_tagger import SoyaWD14Tagger_mdsoya
+from .soya_ipadapter_embed_cache import SoyaIPAdapterEmbedCache_mdsoya
+from .soya_ipadapter_embeds_toggle import SoyaIPAdapterEmbedsToggle_mdsoya
 
 # main-only nodes (for 배포예정_삽화_V3 + ray scheduler)
 from .soya_process_divider import SoyaProcessDivider_mdsoya
@@ -90,6 +92,8 @@ NODE_CLASS_MAPPINGS = {
     "SoyaShortSide_mdsoya": SoyaShortSide_mdsoya,
     "SoyaToString_mdsoya": SoyaToString_mdsoya,
     "SoyaWD14Tagger_mdsoya": SoyaWD14Tagger_mdsoya,
+    "SoyaIPAdapterEmbedCache_mdsoya": SoyaIPAdapterEmbedCache_mdsoya,
+    "SoyaIPAdapterEmbedsToggle_mdsoya": SoyaIPAdapterEmbedsToggle_mdsoya,
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": SoyaProcessDivider_mdsoya,
     "SoyaProcessCollector_mdsoya": SoyaProcessCollector_mdsoya,
@@ -142,6 +146,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaShortSide_mdsoya": "Short Side (Soya)",
     "SoyaToString_mdsoya": "To String (Soya)",
     "SoyaWD14Tagger_mdsoya": "WD14 Tagger (Soya)",
+    "SoyaIPAdapterEmbedCache_mdsoya": "IPAdapter Embed Cache (Soya)",
+    "SoyaIPAdapterEmbedsToggle_mdsoya": "IPAdapter Embeds Toggle (Soya)",
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": "Soya Process Divider (Soya)",
     "SoyaProcessCollector_mdsoya": "Soya Process Collector (Soya)",
