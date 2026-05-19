@@ -43,6 +43,7 @@ from .soya_ipadapter_embeds_toggle import SoyaIPAdapterEmbedsToggle_mdsoya
 from .soya_face_embed_cache import SoyaFaceEmbedCache_mdsoya
 from .soya_weighted_combine_embeds import SoyaWeightedCombineEmbeds_mdsoya
 from .soya_ipadapter_weight_calc import SoyaIPAdapterWeightCalc_mdsoya
+from .soya_batch_lora_loader import SoyaBatchLoraLoader_mdsoya
 
 # main-only nodes (for 배포예정_삽화_V3 + ray scheduler)
 from .soya_process_divider import SoyaProcessDivider_mdsoya
@@ -98,6 +99,7 @@ NODE_CLASS_MAPPINGS = {
     "SoyaFaceEmbedCache_mdsoya": SoyaFaceEmbedCache_mdsoya,
     "SoyaWeightedCombineEmbeds_mdsoya": SoyaWeightedCombineEmbeds_mdsoya,
     "SoyaIPAdapterWeightCalc_mdsoya": SoyaIPAdapterWeightCalc_mdsoya,
+    "SoyaBatchLoraLoader_mdsoya": SoyaBatchLoraLoader_mdsoya,
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": SoyaProcessDivider_mdsoya,
     "SoyaProcessCollector_mdsoya": SoyaProcessCollector_mdsoya,
@@ -154,6 +156,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaFaceEmbedCache_mdsoya": "Face Embed Cache (Soya)",
     "SoyaWeightedCombineEmbeds_mdsoya": "Weighted Combine Embeds (Soya)",
     "SoyaIPAdapterWeightCalc_mdsoya": "IPAdapter Weight Calc (Soya)",
+    "SoyaBatchLoraLoader_mdsoya": "Batch LoRA Loader (Soya)",
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": "Soya Process Divider (Soya)",
     "SoyaProcessCollector_mdsoya": "Soya Process Collector (Soya)",
