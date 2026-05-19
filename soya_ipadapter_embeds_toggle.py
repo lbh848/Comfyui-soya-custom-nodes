@@ -2,7 +2,9 @@
 SoyaIPAdapterEmbedsToggle – Wrapper around IPAdapterEmbeds with enable/disable toggle.
 
 enable="true"  → delegate to IPAdapterEmbeds.apply_ipadapter (model patched)
-enable="false" → return model as-is, clear attn2 patches
+enable="false" → return model as-is (passthrough)
+
+Note: Use IPAdapter Patch Cleaner (Soya) to clear stale patches before this node.
 """
 
 import os
@@ -47,12 +49,6 @@ class SoyaIPAdapterEmbedsToggle_mdsoya:
                 start_at, end_at, embeds_scaling,
                 neg_embed=None, attn_mask=None, clip_vision=None):
         use = enable.strip().lower() in ("true", "1", "yes")
-
-        # Clear stale attn2 patches (both true/false)
-        transformer_options = model.model_options.setdefault("transformer_options", {})
-        patches_replace = transformer_options.setdefault("patches_replace", {})
-        if "attn2" in patches_replace:
-            del patches_replace["attn2"]
 
         if not use:
             print("[Soya:EmbedsToggle] DISABLED — skipping IPAdapter patch")

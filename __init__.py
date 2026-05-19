@@ -18,7 +18,6 @@ from .soya_batch_detailer import SoyaBatchDetailer_mdsoya
 from .mask_and_segs_bbox import MaskAndSegsBBox_mdsoya
 from .segs_label_transfer import SegsLabelTransfer_mdsoya
 from .soya_color_adjust_config import SoyaColorAdjustConfig_mdsoya
-from .soya_faceid_yolo_fallback import SoyaFaceIDYoloFallback_mdsoya
 from .soya_pose_json_converter import SoyaPoseJsonConverter_mdsoya
 from .soya_string_to_float import SoyaStringToFloat_mdsoya
 from .soya_face_detailer_toggle import SoyaFaceDetailerToggle_mdsoya
@@ -41,6 +40,9 @@ from .soya_to_string import SoyaToString_mdsoya
 from .soya_wd14_tagger import SoyaWD14Tagger_mdsoya
 from .soya_ipadapter_embed_cache import SoyaIPAdapterEmbedCache_mdsoya
 from .soya_ipadapter_embeds_toggle import SoyaIPAdapterEmbedsToggle_mdsoya
+from .soya_face_embed_cache import SoyaFaceEmbedCache_mdsoya
+from .soya_weighted_combine_embeds import SoyaWeightedCombineEmbeds_mdsoya
+from .soya_ipadapter_weight_calc import SoyaIPAdapterWeightCalc_mdsoya
 
 # main-only nodes (for 배포예정_삽화_V3 + ray scheduler)
 from .soya_process_divider import SoyaProcessDivider_mdsoya
@@ -71,7 +73,6 @@ NODE_CLASS_MAPPINGS = {
     "MaskAndSegsBBox_mdsoya": MaskAndSegsBBox_mdsoya,
     "SegsLabelTransfer_mdsoya": SegsLabelTransfer_mdsoya,
     "SoyaColorAdjustConfig_mdsoya": SoyaColorAdjustConfig_mdsoya,
-    "SoyaFaceIDYoloFallback_mdsoya": SoyaFaceIDYoloFallback_mdsoya,
     "SoyaPoseJsonConverter_mdsoya": SoyaPoseJsonConverter_mdsoya,
     "SoyaStringToFloat_mdsoya": SoyaStringToFloat_mdsoya,
     "SoyaFaceDetailerToggle_mdsoya": SoyaFaceDetailerToggle_mdsoya,
@@ -94,6 +95,9 @@ NODE_CLASS_MAPPINGS = {
     "SoyaWD14Tagger_mdsoya": SoyaWD14Tagger_mdsoya,
     "SoyaIPAdapterEmbedCache_mdsoya": SoyaIPAdapterEmbedCache_mdsoya,
     "SoyaIPAdapterEmbedsToggle_mdsoya": SoyaIPAdapterEmbedsToggle_mdsoya,
+    "SoyaFaceEmbedCache_mdsoya": SoyaFaceEmbedCache_mdsoya,
+    "SoyaWeightedCombineEmbeds_mdsoya": SoyaWeightedCombineEmbeds_mdsoya,
+    "SoyaIPAdapterWeightCalc_mdsoya": SoyaIPAdapterWeightCalc_mdsoya,
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": SoyaProcessDivider_mdsoya,
     "SoyaProcessCollector_mdsoya": SoyaProcessCollector_mdsoya,
@@ -125,7 +129,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MaskAndSegsBBox_mdsoya": "Mask AND Segs BBox (Soya)",
     "SegsLabelTransfer_mdsoya": "SEGS Label Transfer (Soya)",
     "SoyaColorAdjustConfig_mdsoya": "Color Adjust Config (Soya)",
-    "SoyaFaceIDYoloFallback_mdsoya": "Soya FaceID YOLO Fallback (Soya)",
     "SoyaPoseJsonConverter_mdsoya": "Pose JSON Converter (Soya)",
     "SoyaStringToFloat_mdsoya": "String to Float (Soya)",
     "SoyaFaceDetailerToggle_mdsoya": "Face Detailer Toggle (Soya)",
@@ -148,6 +151,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaWD14Tagger_mdsoya": "WD14 Tagger (Soya)",
     "SoyaIPAdapterEmbedCache_mdsoya": "IPAdapter Embed Cache (Soya)",
     "SoyaIPAdapterEmbedsToggle_mdsoya": "IPAdapter Embeds Toggle (Soya)",
+    "SoyaFaceEmbedCache_mdsoya": "Face Embed Cache (Soya)",
+    "SoyaWeightedCombineEmbeds_mdsoya": "Weighted Combine Embeds (Soya)",
+    "SoyaIPAdapterWeightCalc_mdsoya": "IPAdapter Weight Calc (Soya)",
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": "Soya Process Divider (Soya)",
     "SoyaProcessCollector_mdsoya": "Soya Process Collector (Soya)",
