@@ -85,4 +85,8 @@ class SoyaHiresfixToggle_mdsoya:
         else:
             decoded = vae.decode(sampled)
 
-        return (torch.clamp(decoded, 0.0, 1.0),)
+        result = torch.clamp(decoded, 0.0, 1.0)
+        # Video VAEs (latent_dim=3) add a temporal dimension; squeeze it for single-image output
+        if result.ndim == 5 and result.shape[1] == 1:
+            result = result.squeeze(1)
+        return (result,)
