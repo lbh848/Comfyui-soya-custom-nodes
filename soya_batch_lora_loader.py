@@ -18,6 +18,7 @@ class SoyaBatchLoraLoader_mdsoya:
                 "model": ("MODEL",),
                 "clip": ("CLIP",),
                 "enable": ("STRING", {"default": "true"}),
+                "apply_clip": ("STRING", {"default": "true"}),
                 "lora_list": ("STRING", {"multiline": True, "default": '{"list":[]}'}),
                 "base_filter": ("STRING", {"default": ""}),
             }
@@ -65,10 +66,12 @@ class SoyaBatchLoraLoader_mdsoya:
             return f"{size / (1024 * 1024):.1f} MB"
         return f"{size / 1024:.1f} KB"
 
-    def load_batch_lora(self, model, clip, enable, lora_list, base_filter):
-        use = enable.strip().lower() in ("true", "1", "yes")
+    def load_batch_lora(self, model, clip, enable, apply_clip, lora_list, base_filter):
+        use = enable.strip().lower() == "true"
+        patch_clip = apply_clip.strip().lower() == "true"
         info_lines = []
         info_lines.append(f"Enable: {enable.strip()} → {'ON' if use else 'OFF'}")
+        info_lines.append(f"Apply Clip: {apply_clip.strip()} → {'ON' if patch_clip else 'OFF'}")
 
         if not use:
             info_lines.append("Result: Passing through (disabled)")
@@ -134,12 +137,16 @@ class SoyaBatchLoraLoader_mdsoya:
                 continue
 
             lora_data = comfy.utils.load_torch_file(resolved, safe_load=True)
+            clip_strength = strength if patch_clip else 0.0
             current_model, current_clip = comfy.sd.load_lora_for_models(
-                current_model, current_clip, lora_data, strength, strength
+                current_model, current_clip, lora_data, strength, clip_strength
             )
             applied_count += 1
             info_lines.append(f"  {i+1}. [APPLIED] {filename}")
-            info_lines.append(f"     Strength: {strength} (model={strength}, clip={strength})")
+            if patch_clip:
+                info_lines.append(f"     Strength: {strength} (model={strength}, clip={strength})")
+            else:
+                info_lines.append(f"     Strength: {strength} (model={strength}, clip=OFF)")
             info_lines.append(f"     BASE: {base}")
             info_lines.append(f"     Size: {file_size}")
 
