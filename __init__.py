@@ -50,6 +50,8 @@ from .soya_detect_and_crop import SoyaDetectAndCrop_mdsoya
 from .soya_clip_embed_saver import SoyaClipEmbedSaver_mdsoya
 from .soya_face_embed_cache_v2 import SoyaFaceEmbedCacheV2_mdsoya
 from .soya_path_resolver import SoyaPathResolver_mdsoya
+from .soya_ipa_patch_config import SoyaIPAPatchConfig_mdsoya
+from .soya_ipa_patch_maker import SoyaIPAPatchMaker_mdsoya
 
 # main-only nodes (for 배포예정_삽화_V3 + ray scheduler)
 from .soya_process_divider import SoyaProcessDivider_mdsoya
@@ -112,6 +114,8 @@ NODE_CLASS_MAPPINGS = {
     "SoyaClipEmbedSaver_mdsoya": SoyaClipEmbedSaver_mdsoya,
     "SoyaFaceEmbedCacheV2_mdsoya": SoyaFaceEmbedCacheV2_mdsoya,
     "SoyaPathResolver_mdsoya": SoyaPathResolver_mdsoya,
+    "SoyaIPAPatchConfig_mdsoya": SoyaIPAPatchConfig_mdsoya,
+    "SoyaIPAPatchMaker_mdsoya": SoyaIPAPatchMaker_mdsoya,
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": SoyaProcessDivider_mdsoya,
     "SoyaProcessCollector_mdsoya": SoyaProcessCollector_mdsoya,
@@ -175,6 +179,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaClipEmbedSaver_mdsoya": "CLIP Embed Saver (Soya)",
     "SoyaFaceEmbedCacheV2_mdsoya": "Face Embed Cache V2 (Soya)",
     "SoyaPathResolver_mdsoya": "Path Resolver (Soya)",
+    "SoyaIPAPatchConfig_mdsoya": "IPA Patch Config (Soya)",
+    "SoyaIPAPatchMaker_mdsoya": "IPA Patch Maker (Soya)",
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": "Soya Process Divider (Soya)",
     "SoyaProcessCollector_mdsoya": "Soya Process Collector (Soya)",
