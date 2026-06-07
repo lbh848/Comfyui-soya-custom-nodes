@@ -1,5 +1,6 @@
 import os
 import json
+import gc
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -7,6 +8,55 @@ from PIL import Image
 from scipy.optimize import linear_sum_assignment
 import folder_paths
 import comfy.model_management
+import comfy.clip_vision
+
+
+def _parse_json_stream(text):
+    """Parse one or more concatenated JSON objects from a string."""
+    text = text.strip()
+    if not text:
+        return []
+    decoder = json.JSONDecoder()
+    objects = []
+    pos = 0
+    while pos < len(text):
+        if text[pos] in ' \t\n\r':
+            pos += 1
+            continue
+        obj, end = decoder.raw_decode(text, idx=pos)
+        objects.append(obj)
+        pos = end
+    return objects
+
+
+# ── Main-process CLIP vision cache ─────────────────────────────
+_main_clip_cache = {}
+
+
+def _load_clip_vision(model_name, device):
+    """Load and cache CLIP vision model for the main process."""
+    key = (model_name, device)
+    if key in _main_clip_cache:
+        return _main_clip_cache[key]
+
+    # Evict old device for same model
+    for k in list(_main_clip_cache):
+        if k[0] == model_name and k[1] != device:
+            _main_clip_cache.pop(k, None)
+    gc.collect()
+
+    clip_path = folder_paths.get_full_path_or_raise("clip_vision", model_name)
+    clip_v = comfy.clip_vision.load(clip_path)
+
+    if device == "CPU":
+        dev = torch.device("cpu")
+        clip_v.load_device = dev
+        clip_v.offload_device = dev
+        clip_v.patcher.model = clip_v.patcher.model.to(dev)
+
+    _main_clip_cache[key] = clip_v
+    return clip_v
+
 
 
 class SoyaIPAPatchMaker_mdsoya:
@@ -22,7 +72,6 @@ class SoyaIPAPatchMaker_mdsoya:
                 "bbox_detector": ("BBOX_DETECTOR",),
                 "image": ("IMAGE",),
                 "config": ("IPA_PATCH_CONFIG",),
-                "clip_vision": ("CLIP_VISION",),
             }
         }
 
@@ -33,9 +82,11 @@ class SoyaIPAPatchMaker_mdsoya:
     CATEGORY = "Soya/IPA"
 
     def process(self, character_names, ipa_cache_data, face_crop_top, face_crop_bottom,
-                embed_cache_data, bbox_detector, image, config, clip_vision):
+                embed_cache_data, bbox_detector, image, config):
 
-        device_str = config["device"]
+        num_cpus = config.get("num_cpus", 1)
+        clip_model_name = config.get("clip_vision_model", "")
+        device = config.get("device", "CPU")
         max_faces = config["max_face_count"]
         yolo_conf = config["yolo_confidence"]
         debug = config["debug"]
@@ -45,15 +96,27 @@ class SoyaIPAPatchMaker_mdsoya:
         if not char_names:
             return ([], [], [], "No character names provided.")
 
-        embed_caches = json.loads(embed_cache_data)["list"]
-        json.loads(ipa_cache_data)  # validate for future use
+        # Validate ipa_cache_data (for future use)
+        _parse_json_stream(ipa_cache_data)
+
+        # Parse embed_cache_data — may be single JSON or concatenated
+        embed_parsed = _parse_json_stream(embed_cache_data)
+        embed_caches = []
+        for obj in embed_parsed:
+            if isinstance(obj, dict) and "list" in obj:
+                embed_caches.extend(obj["list"])
+            elif isinstance(obj, list):
+                embed_caches.extend(obj)
+
+        if not embed_caches:
+            return ([], [], [], "No embed cache entries provided.")
 
         # ── STEP 1: YOLO face detection + crop ──
         yolo = bbox_detector.bbox_model
         side_factor = (face_crop_top + face_crop_bottom) / 2
 
-        detected_faces = []   # list of (1, H, W, 3) tensors
-        face_bbox_areas = []  # (area, index) for size-based filtering
+        detected_faces = []
+        face_bbox_areas = []
 
         for img_tensor in image:
             img_np = (img_tensor.cpu().numpy() * 255).astype(np.uint8)
@@ -90,7 +153,6 @@ class SoyaIPAPatchMaker_mdsoya:
                     detected_faces.append(face_tensor)
                     face_bbox_areas.append((bw * bh, len(detected_faces) - 1))
 
-        # Filter by max face count — keep largest faces
         total_detected = len(detected_faces)
         if total_detected > max_faces:
             face_bbox_areas.sort(key=lambda x: x[0], reverse=True)
@@ -102,17 +164,22 @@ class SoyaIPAPatchMaker_mdsoya:
             return ([], [], [], info)
 
         # ── STEP 2: CLIP Vision encode detected faces ──
-        comfy.model_management.load_model_gpu(clip_vision.patcher)
+        n_workers = min(num_cpus, len(detected_faces))
+        use_ray = n_workers > 1
+        ray_fallback_error = None
+        if use_ray:
+            try:
+                face_embeds = self._encode_parallel(detected_faces, clip_model_name, n_workers)
+            except Exception as e:
+                ray_fallback_error = str(e)
+                print(f"[IPAPatchMaker] Ray parallel encoding failed ({e}), falling back to sequential")
+                clip_vision = _load_clip_vision(clip_model_name, device)
+                face_embeds = self._encode_sequential(detected_faces, clip_vision)
+        else:
+            clip_vision = _load_clip_vision(clip_model_name, device)
+            face_embeds = self._encode_sequential(detected_faces, clip_vision)
 
-        face_embeds = []
-        for face in detected_faces:
-            encoded = clip_vision.encode_image(face, crop=True)
-            embed = encoded.image_embeds
-            if embed.dim() > 2:
-                embed = embed.view(1, -1)
-            face_embeds.append(embed)
-
-        face_embeds = torch.cat(face_embeds, dim=0)  # (M, embed_dim)
+        face_embeds = torch.cat(face_embeds, dim=0)
 
         # ── STEP 3: Load cached embeddings + Hungarian matching ──
         input_dir = folder_paths.get_input_directory()
@@ -121,13 +188,12 @@ class SoyaIPAPatchMaker_mdsoya:
         for entry in embed_caches:
             char_name = entry["CHAR"]
             emb_path = os.path.join(input_dir, entry["emb_path"])
-            cache = torch.load(emb_path, map_location="cpu")
-            embeds = cache["embeds"]  # (K, embed_dim)
+            cache = torch.load(emb_path, map_location="cpu", weights_only=True)
+            embeds = cache["embeds"]
             if embeds.dim() > 2:
                 embeds = embeds.view(embeds.size(0), -1)
             char_embeds[char_name] = embeds
 
-        # Build similarity matrix: max cosine similarity per (face, character)
         M = face_embeds.shape[0]
         N = len(char_names)
         sim_matrix = torch.zeros(M, N)
@@ -135,12 +201,11 @@ class SoyaIPAPatchMaker_mdsoya:
         for j, char_name in enumerate(char_names):
             if char_name not in char_embeds:
                 continue
-            char_embs = char_embeds[char_name]  # (K, embed_dim)
+            char_embs = char_embeds[char_name]
             for i in range(M):
                 sims = F.cosine_similarity(face_embeds[i].unsqueeze(0), char_embs, dim=1)
                 sim_matrix[i, j] = sims.max().item()
 
-        # Hungarian algorithm for 1:1 optimal assignment
         row_ind, col_ind = linear_sum_assignment(-sim_matrix.cpu().numpy())
 
         final_names = ["unknown"] * M
@@ -150,10 +215,16 @@ class SoyaIPAPatchMaker_mdsoya:
                 final_names[r] = char_names[c]
                 final_scores[r] = float(sim_matrix[r, c].item())
 
-        # ── Build outputs ──
         matched_count = sum(1 for n in final_names if n != "unknown")
+        if ray_fallback_error:
+            encode_mode = f"Ray x{n_workers} FAILED -> sequential ({ray_fallback_error})"
+        elif use_ray:
+            encode_mode = f"Ray x{n_workers}"
+        else:
+            encode_mode = "sequential"
         info_lines = [
-            f"Detected {total_detected} face(s), kept {len(detected_faces)}, matched {matched_count}",
+            f"Detected {total_detected} face(s), kept {len(detected_faces)}, "
+            f"matched {matched_count} [{encode_mode}]",
         ]
         for i, (name, score) in enumerate(zip(final_names, final_scores)):
             info_lines.append(f"  Face {i + 1}: {name} ({score:.4f})")
@@ -163,7 +234,6 @@ class SoyaIPAPatchMaker_mdsoya:
         if not debug:
             return ([], [], [], info)
 
-        # Debug outputs: named faces only
         named_faces = []
         named_names = []
         for i, name in enumerate(final_names):
@@ -172,3 +242,34 @@ class SoyaIPAPatchMaker_mdsoya:
                 named_names.append(name)
 
         return (detected_faces, named_faces, named_names, info)
+
+    def _encode_sequential(self, detected_faces, clip_vision):
+        comfy.model_management.load_model_gpu(clip_vision.patcher)
+        embeds = []
+        for face in detected_faces:
+            encoded = clip_vision.encode_image(face, crop=True)
+            embed = encoded.image_embeds
+            if embed.dim() > 2:
+                embed = embed.view(1, -1)
+            embeds.append(embed)
+        return embeds
+
+    def _encode_parallel(self, detected_faces, clip_model_name, n_workers):
+        import ray
+        from .soya_scheduler import get_encoder_pool
+
+        clip_path = folder_paths.get_full_path("clip_vision", clip_model_name)
+        if not clip_path:
+            raise ValueError(f"CLIP vision model not found: {clip_model_name}")
+
+        print(f"[IPAPatchMaker] Ray parallel encoding: {len(detected_faces)} faces, {n_workers} workers")
+        pool = get_encoder_pool(n_workers, clip_path)
+
+        futures = []
+        for i, face in enumerate(detected_faces):
+            face_np = face.cpu().numpy()
+            actor = pool[i % n_workers]
+            futures.append(actor.encode.remote(face_np))
+
+        results = ray.get(futures)
+        return [torch.from_numpy(r) for r in results]

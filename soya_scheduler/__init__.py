@@ -65,6 +65,13 @@ def get_analyzer():
             pass
         _analyzer = None
 
+    if _analyzer is not None:
+        try:
+            import ray
+            ray.get(_analyzer.ping.remote(), timeout=2)
+        except Exception:
+            _analyzer = None
+
     if _analyzer is None:
         import ray
         from .ray_worker import FaceAnalyzer
@@ -73,3 +80,42 @@ def get_analyzer():
         _analyzer_device = device
 
     return _analyzer
+
+
+# ── FaceClipEncoder pool for IPA Patch Maker ───────────────────
+_encoder_pool = None
+_encoder_pool_key = None
+
+
+def get_encoder_pool(num_cpus, model_path):
+    """Get or create a pool of FaceClipEncoder actors.
+    Cached by (num_cpus, model_path). Recreated only when config changes."""
+    global _encoder_pool, _encoder_pool_key
+    ensure_ray_initialized()
+    import ray
+
+    key = (num_cpus, model_path)
+
+    # Kill old pool if config changed
+    if _encoder_pool is not None and _encoder_pool_key != key:
+        for actor in _encoder_pool:
+            try:
+                ray.kill(actor)
+            except Exception:
+                pass
+        _encoder_pool = None
+
+    # Verify existing actors are alive
+    if _encoder_pool is not None:
+        try:
+            ray.get([a.ping.remote() for a in _encoder_pool], timeout=5)
+        except Exception:
+            _encoder_pool = None
+
+    if _encoder_pool is None:
+        from .ray_worker import FaceClipEncoder
+        _encoder_pool = [FaceClipEncoder.remote(model_path, "cpu") for _ in range(num_cpus)]
+        _encoder_pool_key = key
+        print(f"[IPAPatchMaker] Created {num_cpus} FaceClipEncoder actors (model: {os.path.basename(model_path)})")
+
+    return _encoder_pool

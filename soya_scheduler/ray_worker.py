@@ -471,3 +471,26 @@ class FaceAnalyzer:
 
     def analyze(self, task_id, face_data, ref_data, config):
         return analyze_faces_sync(task_id, face_data, ref_data, config)
+
+    def ping(self):
+        return "ok"
+
+
+@ray.remote
+class FaceClipEncoder:
+    """Actor for parallel CLIP face encoding (IPA Patch Maker)."""
+
+    def __init__(self, model_path, device="cpu"):
+        torch.set_num_threads(1)
+        self.clip = _get_clip_vision(model_path, device)
+
+    def encode(self, face_np):
+        face_tensor = torch.from_numpy(face_np)
+        encoded = self.clip.encode_image(face_tensor, crop=True)
+        embed = encoded.image_embeds
+        if embed.dim() > 2:
+            embed = embed.view(1, -1)
+        return embed.detach().cpu().numpy()
+
+    def ping(self):
+        return "ok"
