@@ -248,7 +248,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
         }
 
     RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "STRING")
-    RETURN_NAMES = ("image", "mask", "mask_preview", "info")
+    RETURN_NAMES = ("image", "mask", "crop_preview", "info")
     FUNCTION = "execute"
     CATEGORY = "Soya/FaceDetailer"
 
@@ -263,7 +263,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
 
         if not use:
             return (image, torch.zeros((B, H, W), dtype=torch.float32),
-                    image * torch.zeros((B, H, W, 1), dtype=torch.float32),
+                    torch.zeros_like(image),
                     "DISABLED")
 
         char_map, char_names, lora_map, _, _ = \
@@ -271,12 +271,13 @@ class SoyaCharLoraFaceDetailer_mdsoya:
 
         if not face_context or not face_context.get("matches"):
             return (image, torch.zeros((B, H, W), dtype=torch.float32),
-                    image * torch.zeros((B, H, W, 1), dtype=torch.float32),
+                    torch.zeros_like(image),
                     "No faces in face_context")
 
         matches = face_context["matches"]
         result_image = image.clone()
         combined_mask = torch.zeros((B, H, W), dtype=torch.float32)
+        crop_region = torch.zeros((B, H, W), dtype=torch.float32)
         log_lines = []
 
         # Encode negative once (shared across all faces)
@@ -460,6 +461,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 combined_mask[batch_idx, cy1:cy2, cx1:cx2] = torch.maximum(
                     combined_mask[batch_idx, cy1:cy2, cx1:cx2], mask
                 )
+                crop_region[batch_idx, cy1:cy2, cx1:cx2] = 1.0
 
                 log_lines.append(
                     f"  {name} | LoRA: {lora_info} | "
@@ -474,6 +476,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
             lora_list, base_model,
         )
         info += "\n" + "═" * 50 + "\nProcessing log:\n" + "\n".join(log_lines)
-        mask_preview = image * combined_mask.unsqueeze(-1)
+        # crop_preview: expanded crop area (bright) + superellipse mask (highlight)
+        crop_preview = image * (crop_region * 0.3 + combined_mask * 0.7).unsqueeze(-1)
         print(f"[CharLoraFaceDetailer] Processed {len(matches)} faces")
-        return (result_image, combined_mask, mask_preview, info)
+        return (result_image, combined_mask, crop_preview, info)
