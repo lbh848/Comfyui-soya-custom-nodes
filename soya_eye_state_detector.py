@@ -20,9 +20,6 @@ class SoyaEyeStateDetector_mdsoya:
                 "image": ("IMAGE",),
                 "eye_model": ("SOYA_SEG_MODEL",),
                 "eyebrow_model": ("SOYA_SEG_MODEL",),
-                "threshold": ("FLOAT", {
-                    "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01,
-                }),
                 "eye_seg_th": ("FLOAT", {
                     "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01,
                 }),
@@ -38,7 +35,7 @@ class SoyaEyeStateDetector_mdsoya:
     FUNCTION = "detect"
     CATEGORY = "Soya/FaceMatch"
 
-    def detect(self, face_context, image, eye_model, eyebrow_model, threshold,
+    def detect(self, face_context, image, eye_model, eyebrow_model,
                eye_seg_th, eyebrow_th):
         from .soya_scheduler.model_manager import eye_seg_segment
 
