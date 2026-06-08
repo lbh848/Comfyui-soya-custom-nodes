@@ -18,7 +18,7 @@ class SoyaIPAPatchConfig_mdsoya:
     RETURN_TYPES = ("IPA_PATCH_CONFIG",)
     RETURN_NAMES = ("config",)
     FUNCTION = "build_config"
-    CATEGORY = "Soya/IPA"
+    CATEGORY = "Soya/FaceMatch"
 
     def build_config(self, device, num_cpus, clip_vision_model, max_face_count, yolo_confidence, debug):
         return ({

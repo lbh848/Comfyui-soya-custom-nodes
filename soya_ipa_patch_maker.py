@@ -105,7 +105,7 @@ class SoyaIPAPatchMaker_mdsoya:
     RETURN_NAMES = ("detected_faces", "named_faces", "names", "info", "face_context")
     OUTPUT_IS_LIST = (True, True, True, False, False)
     FUNCTION = "process"
-    CATEGORY = "Soya/IPA"
+    CATEGORY = "Soya/FaceMatch"
 
     def process(self, character_names, ipa_cache_data, face_crop_top, face_crop_bottom,
                 embed_cache_data, bbox_detector, image, config, combine_method):
