@@ -4,7 +4,7 @@ SoyaCharLoraFaceDetailer – Per-face detailer with character-specific LoRA patc
 For each face in face_context:
   1. Identify character → find matching LoRA (filtered by base_model)
   2. Apply ONLY that character's LoRA to a fresh copy of the original model
-  3. Assemble prompt: quality_tags + artist_tags + FACE_TAGS + EYE_TAGS
+  3. Assemble prompt: quality_tags + artist_tags + FACE_TAGS + EYE_TAGS + POSITIVE
   4. Crop face region from image (8-aligned coords, crop_expand_factor padding)
   5. Upscale crop by upscale_factor for higher-resolution processing
   6. VAE encode → KSampler → VAE decode → downscale back → paste with feathered mask
@@ -74,6 +74,7 @@ def _parse_inputs(char_tags, lora_list, base_model):
             char_map[name] = {
                 "FACE_TAGS": entry.get("FACE_TAGS", ""),
                 "EYE_TAGS": entry.get("EYE_TAGS", ""),
+                "POSITIVE": entry.get("POSITIVE", ""),
             }
             char_names.append(name)
 
@@ -115,7 +116,8 @@ def _compute_info(face_context, char_tags, quality_tags, artist_tags,
         tags = char_map.get(name, {})
         face_tags = tags.get("FACE_TAGS", "")
         eye_tags = tags.get("EYE_TAGS", "")
-        parts = [p for p in [quality_tags, artist_tags, face_tags, eye_tags] if p.strip()]
+        positive_tags = tags.get("POSITIVE", "")
+        parts = [p for p in [quality_tags, artist_tags, face_tags, eye_tags, positive_tags] if p.strip()]
         prompt = ", ".join(parts)
 
         lora_entry = lora_map.get(name)
@@ -227,7 +229,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 "clip": ("CLIP",),
                 "vae": ("VAE",),
                 "face_context": ("IPA_FACE_CONTEXT",),
-                "char_tags": ("STRING", {"multiline": True, "default": '{"list":[{"CHAR":"name","FACE_TAGS":"face tags","EYE_TAGS":"eye tags"}]}'}),
+                "char_tags": ("STRING", {"multiline": True, "default": '{"list":[{"CHAR":"name","FACE_TAGS":"face tags","EYE_TAGS":"eye tags","POSITIVE":"positive tags"}]}'}),
                 "quality_tags": ("STRING", {"default": ""}),
                 "artist_tags": ("STRING", {"default": ""}),
                 "negative": ("STRING", {"multiline": True, "default": ""}),
@@ -320,7 +322,8 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 tags = char_map[name]
                 face_tags = tags["FACE_TAGS"]
                 eye_tags = tags["EYE_TAGS"]
-                parts = [p for p in [quality_tags, artist_tags, face_tags, eye_tags] if p.strip()]
+                positive_tags = tags["POSITIVE"]
+                parts = [p for p in [quality_tags, artist_tags, face_tags, eye_tags, positive_tags] if p.strip()]
                 prompt = ", ".join(parts)
 
                 positive_cond = _encode_conditioning(clip, prompt)
