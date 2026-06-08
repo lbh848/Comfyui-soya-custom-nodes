@@ -386,18 +386,17 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 #   t=0.25 → n=8 (subtle rounding)
                 #   t=0.5 → n=4 (squircle)
                 #   t=1.0 → n=2 (ellipse)
-                sx = actual_w / max(1, crop_w)
-                sy = actual_h / max(1, crop_h)
-                local_cx = (cr_cx - cx1) * sx
-                local_cy = (cr_cy - cy1) * sy
-                local_hw = max(1.0, (cr_x2 - cr_x1) / 2.0 * sx)
-                local_hh = max(1.0, (cr_y2 - cr_y1) / 2.0 * sy)
+                # Map original crop coords to process_crop local space (no scaling)
+                local_cx = cr_cx - cx1
+                local_cy = cr_cy - cy1
+                local_hw = max(1.0, (cr_x2 - cr_x1) / 2.0)
+                local_hh = max(1.0, (cr_y2 - cr_y1) / 2.0)
 
                 if corner_roundness <= 0.0:
-                    local_x1 = max(0, int((cr_x1 - cx1) * sx))
-                    local_y1 = max(0, int((cr_y1 - cy1) * sy))
-                    local_x2 = min(actual_w, int((cr_x2 - cx1) * sx))
-                    local_y2 = min(actual_h, int((cr_y2 - cy1) * sy))
+                    local_x1 = max(0, int(cr_x1 - cx1))
+                    local_y1 = max(0, int(cr_y1 - cy1))
+                    local_x2 = min(actual_w, int(cr_x2 - cx1))
+                    local_y2 = min(actual_h, int(cr_y2 - cy1))
                     mask = torch.zeros((actual_h, actual_w), dtype=torch.float32)
                     if local_x2 > local_x1 and local_y2 > local_y1:
                         mask[local_y1:local_y2, local_x1:local_x2] = 1.0
@@ -478,6 +477,8 @@ class SoyaCharLoraFaceDetailer_mdsoya:
 
                 log_lines.append(
                     f"  {name} | LoRA: {lora_info} | "
+                    f"original_crop:({cr_x1},{cr_y1},{cr_x2},{cr_y2}) | "
+                    f"process_crop:({cx1},{cy1},{cx2},{cy2}) | "
                     f"crop: {actual_w}x{actual_h} | "
                     f"process: {process_w}x{process_h} | "
                     f"Prompt: {prompt}"
