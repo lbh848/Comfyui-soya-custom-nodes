@@ -207,9 +207,12 @@ class SoyaFaceDetailerToggle_mdsoya:
             )
 
             enhanced = vae.decode(refined_latent)  # (1, target_h, target_w, 3)
+            enhanced_crop = enhanced[0].clamp(0, 1)
+            while enhanced_crop.dim() > 3:
+                enhanced_crop = enhanced_crop[0]
 
             # 6. Resize enhanced image back on GPU (no PIL)
-            enhanced_4d = enhanced[0].permute(2, 0, 1).unsqueeze(0)
+            enhanced_4d = enhanced_crop.permute(2, 0, 1).unsqueeze(0)
             enhanced_4d = F.interpolate(enhanced_4d, size=(crop_h, crop_w), mode='bicubic', align_corners=False)
             enhanced_crop = enhanced_4d.squeeze(0).permute(1, 2, 0).clamp(0, 1)
 
