@@ -284,7 +284,9 @@ class SoyaIPAPatchMaker_mdsoya:
             f"matched {matched_count} [{encode_mode}]",
         ]
         for i, (name, score) in enumerate(zip(final_names, final_scores)):
-            info_lines.append(f"  Face {i + 1}: {name} ({score:.4f})")
+            bbox = all_bboxes[i] if i < len(all_bboxes) else (0, 0, 0, 0)
+            crop = all_crops[i] if i < len(all_crops) else (0, 0, 0, 0)
+            info_lines.append(f"  Face {i + 1}: {name} ({score:.4f})  bbox:({bbox[0]:.0f},{bbox[1]:.0f},{bbox[2]:.0f},{bbox[3]:.0f})  crop:({crop[0]:.0f},{crop[1]:.0f},{crop[2]:.0f},{crop[3]:.0f})")
         info = "\n".join(info_lines)
         print(f"[IPAPatchMaker] {info}")
 
