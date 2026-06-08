@@ -169,6 +169,50 @@ def _run_ksampler(model, seed, steps, cfg, sampler_name, scheduler,
     return result[0]["samples"]
 
 
+def _compute_voronoi_zones(matches, H, W):
+    """Compute per-face Voronoi ownership masks (each pixel assigned to nearest face center)."""
+    if not matches:
+        return []
+
+    centers = []
+    for m in matches:
+        crop = m["crop"]
+        centers.append(((crop[0] + crop[2]) / 2.0, (crop[1] + crop[3]) / 2.0))
+
+    if len(centers) == 1:
+        mask = torch.ones((H, W), dtype=torch.float32)
+        return [mask]
+
+    # Bounding box of all face regions for efficiency
+    all_x1 = [int(m["crop"][0]) for m in matches]
+    all_y1 = [int(m["crop"][1]) for m in matches]
+    all_x2 = [int(m["crop"][2]) for m in matches]
+    all_y2 = [int(m["crop"][3]) for m in matches]
+    bx1, by1 = max(0, min(all_x1)), max(0, min(all_y1))
+    bx2, by2 = min(W, max(all_x2)), min(H, max(all_y2))
+
+    yy, xx = torch.meshgrid(
+        torch.arange(by1, by2, dtype=torch.float32),
+        torch.arange(bx1, bx2, dtype=torch.float32),
+        indexing='ij'
+    )
+
+    nearest = torch.zeros_like(xx, dtype=torch.long)
+    min_dist = torch.full_like(xx, float('inf'))
+    for i, (cx, cy) in enumerate(centers):
+        dist = (xx - cx) ** 2 + (yy - cy) ** 2
+        closer = dist < min_dist
+        nearest[closer] = i
+        min_dist[closer] = dist[closer]
+
+    masks = []
+    for i in range(len(matches)):
+        mask = torch.zeros((H, W), dtype=torch.float32)
+        mask[by1:by2, bx1:bx2] = (nearest == i).float()
+        masks.append(mask)
+    return masks
+
+
 # ── Main Face Detailer Node ────────────────────────────────────────
 
 class SoyaCharLoraFaceDetailer_mdsoya:
@@ -198,12 +242,13 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
                 "denoise": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "feather": ("INT", {"default": 5, "min": 0, "max": 100}),
+                "corner_roundness": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "noise_mask": ("BOOLEAN", {"default": True}),
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
-    RETURN_NAMES = ("image", "mask", "info")
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "STRING")
+    RETURN_NAMES = ("image", "mask", "mask_preview", "info")
     FUNCTION = "execute"
     CATEGORY = "Soya/FaceDetailer"
 
@@ -211,19 +256,22 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 char_tags, quality_tags, artist_tags, negative,
                 lora_list, base_model,
                 crop_expand_factor, upscale_factor, seed, steps, cfg, sampler_name, scheduler,
-                denoise, feather, noise_mask):
+                denoise, feather, corner_roundness, noise_mask):
 
         B, H, W, C = image.shape
         use = enable.strip().lower() in ("true", "1", "yes")
 
         if not use:
-            return (image, torch.zeros((B, H, W), dtype=torch.float32), "DISABLED")
+            return (image, torch.zeros((B, H, W), dtype=torch.float32),
+                    image * torch.zeros((B, H, W, 1), dtype=torch.float32),
+                    "DISABLED")
 
         char_map, char_names, lora_map, _, _ = \
             _parse_inputs(char_tags, lora_list, base_model)
 
         if not face_context or not face_context.get("matches"):
             return (image, torch.zeros((B, H, W), dtype=torch.float32),
+                    image * torch.zeros((B, H, W, 1), dtype=torch.float32),
                     "No faces in face_context")
 
         matches = face_context["matches"]
@@ -234,8 +282,11 @@ class SoyaCharLoraFaceDetailer_mdsoya:
         # Encode negative once (shared across all faces)
         negative_cond = _encode_conditioning(clip, negative)
 
+        # Compute Voronoi zones so overlapping faces get unique regions
+        voronoi_masks = _compute_voronoi_zones(matches, H, W)
+
         for batch_idx in range(B):
-            for match in matches:
+            for match_idx, match in enumerate(matches):
                 name = match["name"]
                 crop = match["crop"]
 
@@ -314,17 +365,44 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 # ── Crop from original image ──
                 crop_tensor = image[batch_idx, cy1:cy2, cx1:cx2].clone()
 
-                # ── Mask from crop region ──
+                # ── Mask from crop region (superellipse = rounded rectangle) ──
+                # corner_roundness: 0=rectangle, 1=ellipse
+                # Internally maps to superellipse exponent: n = 2/max(t, 0.01)
+                #   t=0   → hard rectangle
+                #   t=0.25 → n=8 (subtle rounding)
+                #   t=0.5 → n=4 (squircle)
+                #   t=1.0 → n=2 (ellipse)
                 sx = actual_w / max(1, crop_w)
                 sy = actual_h / max(1, crop_h)
-                local_x1 = max(0, int((cr_x1 - cx1) * sx))
-                local_y1 = max(0, int((cr_y1 - cy1) * sy))
-                local_x2 = min(actual_w, int((cr_x2 - cx1) * sx))
-                local_y2 = min(actual_h, int((cr_y2 - cy1) * sy))
+                local_cx = (cr_cx - cx1) * sx
+                local_cy = (cr_cy - cy1) * sy
+                local_hw = max(1.0, (cr_x2 - cr_x1) / 2.0 * sx)
+                local_hh = max(1.0, (cr_y2 - cr_y1) / 2.0 * sy)
 
-                mask = torch.zeros((actual_h, actual_w), dtype=torch.float32)
-                if local_x2 > local_x1 and local_y2 > local_y1:
-                    mask[local_y1:local_y2, local_x1:local_x2] = 1.0
+                if corner_roundness <= 0.0:
+                    local_x1 = max(0, int((cr_x1 - cx1) * sx))
+                    local_y1 = max(0, int((cr_y1 - cy1) * sy))
+                    local_x2 = min(actual_w, int((cr_x2 - cx1) * sx))
+                    local_y2 = min(actual_h, int((cr_y2 - cy1) * sy))
+                    mask = torch.zeros((actual_h, actual_w), dtype=torch.float32)
+                    if local_x2 > local_x1 and local_y2 > local_y1:
+                        mask[local_y1:local_y2, local_x1:local_x2] = 1.0
+                else:
+                    n = 2.0 / max(corner_roundness, 0.01)
+                    yy, xx = torch.meshgrid(
+                        torch.arange(actual_h, dtype=torch.float32),
+                        torch.arange(actual_w, dtype=torch.float32),
+                        indexing='ij'
+                    )
+                    nx = (xx - local_cx) / local_hw
+                    ny = (yy - local_cy) / local_hh
+                    superellipse = (nx.abs() ** n + ny.abs() ** n)
+                    mask = (superellipse <= 1.0).float()
+
+                # Intersect with Voronoi zone (only pixels owned by this face)
+                if voronoi_masks:
+                    voronoi_crop = voronoi_masks[match_idx][cy1:cy2, cx1:cx2]
+                    mask = mask * voronoi_crop
 
                 if feather > 0:
                     mask = _gaussian_blur_gpu(mask, feather)
@@ -396,5 +474,6 @@ class SoyaCharLoraFaceDetailer_mdsoya:
             lora_list, base_model,
         )
         info += "\n" + "═" * 50 + "\nProcessing log:\n" + "\n".join(log_lines)
+        mask_preview = image * combined_mask.unsqueeze(-1)
         print(f"[CharLoraFaceDetailer] Processed {len(matches)} faces")
-        return (result_image, combined_mask, info)
+        return (result_image, combined_mask, mask_preview, info)

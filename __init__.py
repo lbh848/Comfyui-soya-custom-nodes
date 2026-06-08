@@ -58,6 +58,7 @@ from .soya_hiresfix_dd_toggle import SoyaHiresfixDDToggle_mdsoya
 from .soya_eye_state_detector import SoyaEyeStateDetector_mdsoya
 from .soya_eye_tag_override import SoyaEyeTagOverride_mdsoya
 from .soya_char_lora_face_detailer import SoyaCharLoraFaceDetailer_mdsoya
+from .soya_apply_mask import SoyaApplyMask_mdsoya
 
 # main-only nodes (for 배포예정_삽화_V3 + ray scheduler)
 from .soya_process_divider import SoyaProcessDivider_mdsoya
@@ -128,6 +129,7 @@ NODE_CLASS_MAPPINGS = {
     "SoyaEyeStateDetector_mdsoya": SoyaEyeStateDetector_mdsoya,
     "SoyaEyeTagOverride_mdsoya": SoyaEyeTagOverride_mdsoya,
     "SoyaCharLoraFaceDetailer_mdsoya": SoyaCharLoraFaceDetailer_mdsoya,
+    "SoyaApplyMask_mdsoya": SoyaApplyMask_mdsoya,
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": SoyaProcessDivider_mdsoya,
     "SoyaProcessCollector_mdsoya": SoyaProcessCollector_mdsoya,
@@ -199,6 +201,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaEyeStateDetector_mdsoya": "Eye State Detector (Soya)",
     "SoyaEyeTagOverride_mdsoya": "Eye Tag Override (Soya)",
     "SoyaCharLoraFaceDetailer_mdsoya": "Char LoRA Face Detailer (Soya)",
+    "SoyaApplyMask_mdsoya": "Apply Mask (Soya)",
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": "Soya Process Divider (Soya)",
     "SoyaProcessCollector_mdsoya": "Soya Process Collector (Soya)",
