@@ -53,6 +53,8 @@ from .soya_path_resolver import SoyaPathResolver_mdsoya
 from .soya_ipa_patch_config import SoyaIPAPatchConfig_mdsoya
 from .soya_ipa_patch_maker import SoyaIPAPatchMaker_mdsoya
 from .soya_hiresfix_spectrum_toggle import SoyaHiresfixSpectrumToggle_mdsoya
+from .soya_ipa_apply_face_patches import SoyaIPAApplyFacePatches_mdsoya
+from .soya_hiresfix_dd_toggle import SoyaHiresfixDDToggle_mdsoya
 
 # main-only nodes (for 배포예정_삽화_V3 + ray scheduler)
 from .soya_process_divider import SoyaProcessDivider_mdsoya
@@ -118,6 +120,8 @@ NODE_CLASS_MAPPINGS = {
     "SoyaIPAPatchConfig_mdsoya": SoyaIPAPatchConfig_mdsoya,
     "SoyaIPAPatchMaker_mdsoya": SoyaIPAPatchMaker_mdsoya,
     "SoyaHiresfixSpectrumToggle_mdsoya": SoyaHiresfixSpectrumToggle_mdsoya,
+    "SoyaIPAApplyFacePatches_mdsoya": SoyaIPAApplyFacePatches_mdsoya,
+    "SoyaHiresfixDDToggle_mdsoya": SoyaHiresfixDDToggle_mdsoya,
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": SoyaProcessDivider_mdsoya,
     "SoyaProcessCollector_mdsoya": SoyaProcessCollector_mdsoya,
@@ -184,6 +188,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaIPAPatchConfig_mdsoya": "IPA Patch Config (Soya)",
     "SoyaIPAPatchMaker_mdsoya": "IPA Patch Maker (Soya)",
     "SoyaHiresfixSpectrumToggle_mdsoya": "Hiresfix Spectrum Toggle (Soya)",
+    "SoyaIPAApplyFacePatches_mdsoya": "IPA Apply Face Patches (Soya)",
+    "SoyaHiresfixDDToggle_mdsoya": "Hiresfix DD Toggle (Soya)",
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": "Soya Process Divider (Soya)",
     "SoyaProcessCollector_mdsoya": "Soya Process Collector (Soya)",

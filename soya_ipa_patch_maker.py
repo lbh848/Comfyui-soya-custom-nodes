@@ -59,6 +59,31 @@ def _load_clip_vision(model_name, device):
 
 
 
+COMBINE_METHODS = [
+    "average", "norm average", "concat", "add", "subtract", "max", "min",
+]
+
+
+def _combine_embeds(embeds, method):
+    if method == "concat":
+        return embeds
+    elif method == "add":
+        return torch.sum(embeds, dim=0).unsqueeze(0)
+    elif method == "subtract":
+        return (embeds[0] - torch.mean(embeds[1:], dim=0)).unsqueeze(0)
+    elif method == "average":
+        return torch.mean(embeds, dim=0).unsqueeze(0)
+    elif method == "norm average":
+        return torch.mean(
+            embeds / torch.norm(embeds, dim=0, keepdim=True), dim=0,
+        ).unsqueeze(0)
+    elif method == "max":
+        return torch.max(embeds, dim=0).values.unsqueeze(0)
+    elif method == "min":
+        return torch.min(embeds, dim=0).values.unsqueeze(0)
+    return embeds
+
+
 class SoyaIPAPatchMaker_mdsoya:
     @classmethod
     def INPUT_TYPES(cls):
@@ -72,17 +97,18 @@ class SoyaIPAPatchMaker_mdsoya:
                 "bbox_detector": ("BBOX_DETECTOR",),
                 "image": ("IMAGE",),
                 "config": ("IPA_PATCH_CONFIG",),
+                "combine_method": (COMBINE_METHODS,),
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "IMAGE", "STRING", "STRING")
-    RETURN_NAMES = ("detected_faces", "named_faces", "names", "info")
-    OUTPUT_IS_LIST = (True, True, True, False)
+    RETURN_TYPES = ("IMAGE", "IMAGE", "STRING", "STRING", "IPA_FACE_CONTEXT")
+    RETURN_NAMES = ("detected_faces", "named_faces", "names", "info", "face_context")
+    OUTPUT_IS_LIST = (True, True, True, False, False)
     FUNCTION = "process"
     CATEGORY = "Soya/IPA"
 
     def process(self, character_names, ipa_cache_data, face_crop_top, face_crop_bottom,
-                embed_cache_data, bbox_detector, image, config):
+                embed_cache_data, bbox_detector, image, config, combine_method):
 
         num_cpus = config.get("num_cpus", 1)
         clip_model_name = config.get("clip_vision_model", "")
@@ -96,8 +122,33 @@ class SoyaIPAPatchMaker_mdsoya:
         if not char_names:
             return ([], [], [], "No character names provided.")
 
-        # Validate ipa_cache_data (for future use)
-        _parse_json_stream(ipa_cache_data)
+        # Parse ipa_cache_data → per-character IPA embeds
+        ipa_parsed = _parse_json_stream(ipa_cache_data)
+        ipa_caches = []
+        for obj in ipa_parsed:
+            if isinstance(obj, dict) and "list" in obj:
+                ipa_caches.extend(obj["list"])
+            elif isinstance(obj, list):
+                ipa_caches.extend(obj)
+
+        input_dir = folder_paths.get_input_directory()
+        ipa_embeds_by_char = {}
+        for entry in ipa_caches:
+            char_name = entry["CHAR"]
+            ipa_path = entry["ipa_path"]
+            strength = entry.get("str", 0.7)
+
+            if not os.path.isabs(ipa_path):
+                ipa_path = os.path.join(input_dir, ipa_path)
+            if not os.path.isfile(ipa_path):
+                print(f"[IPAPatchMaker] WARNING: IPA cache not found for {char_name}: {ipa_path}")
+                continue
+
+            raw = torch.load(ipa_path, map_location="cpu", weights_only=True)
+            ipa_embeds_by_char[char_name] = {
+                "embeds": _combine_embeds(raw, combine_method),
+                "strength": strength,
+            }
 
         # Parse embed_cache_data — may be single JSON or concatenated
         embed_parsed = _parse_json_stream(embed_cache_data)
@@ -109,7 +160,7 @@ class SoyaIPAPatchMaker_mdsoya:
                 embed_caches.extend(obj)
 
         if not embed_caches:
-            return ([], [], [], "No embed cache entries provided.")
+            return ([], [], [], "No embed cache entries provided.", {})
 
         # ── STEP 1: YOLO face detection + crop ──
         yolo = bbox_detector.bbox_model
@@ -117,11 +168,14 @@ class SoyaIPAPatchMaker_mdsoya:
 
         detected_faces = []
         face_bbox_areas = []
+        all_bboxes = []
+        img_H, img_W = 0, 0
 
         for img_tensor in image:
             img_np = (img_tensor.cpu().numpy() * 255).astype(np.uint8)
             pil_img = Image.fromarray(img_np)
             W, H = pil_img.size
+            img_H, img_W = H, W
 
             detections = yolo(img_np, verbose=False)
             for result in detections:
@@ -151,6 +205,7 @@ class SoyaIPAPatchMaker_mdsoya:
                     face_tensor = torch.from_numpy(cropped_np).unsqueeze(0)
 
                     detected_faces.append(face_tensor)
+                    all_bboxes.append((float(x1), float(y1), float(x2), float(y2)))
                     face_bbox_areas.append((bw * bh, len(detected_faces) - 1))
 
         total_detected = len(detected_faces)
@@ -158,10 +213,11 @@ class SoyaIPAPatchMaker_mdsoya:
             face_bbox_areas.sort(key=lambda x: x[0], reverse=True)
             keep_indices = sorted([idx for _, idx in face_bbox_areas[:max_faces]])
             detected_faces = [detected_faces[i] for i in keep_indices]
+            all_bboxes = [all_bboxes[i] for i in keep_indices]
 
         if not detected_faces:
             info = f"No faces detected (YOLO conf: {yolo_conf}, total before filter: {total_detected})"
-            return ([], [], [], info)
+            return ([], [], [], info, {})
 
         # ── STEP 2: CLIP Vision encode detected faces ──
         n_workers = min(num_cpus, len(detected_faces))
@@ -182,8 +238,6 @@ class SoyaIPAPatchMaker_mdsoya:
         face_embeds = torch.cat(face_embeds, dim=0)
 
         # ── STEP 3: Load cached embeddings + Hungarian matching ──
-        input_dir = folder_paths.get_input_directory()
-
         char_embeds = {}
         for entry in embed_caches:
             char_name = entry["CHAR"]
@@ -231,8 +285,23 @@ class SoyaIPAPatchMaker_mdsoya:
         info = "\n".join(info_lines)
         print(f"[IPAPatchMaker] {info}")
 
+        # ── Build face context for downstream nodes ──
+        face_context = {
+            "matches": [],
+            "ipa_embeds": ipa_embeds_by_char,
+            "img_H": img_H,
+            "img_W": img_W,
+        }
+        for i, (name, score) in enumerate(zip(final_names, final_scores)):
+            bbox = all_bboxes[i] if i < len(all_bboxes) else (0, 0, 0, 0)
+            face_context["matches"].append({
+                "name": name,
+                "bbox": bbox,
+                "score": score,
+            })
+
         if not debug:
-            return ([], [], [], info)
+            return ([], [], [], info, face_context)
 
         named_faces = []
         named_names = []
@@ -241,7 +310,7 @@ class SoyaIPAPatchMaker_mdsoya:
                 named_faces.append(detected_faces[i])
                 named_names.append(name)
 
-        return (detected_faces, named_faces, named_names, info)
+        return (detected_faces, named_faces, named_names, info, face_context)
 
     def _encode_sequential(self, detected_faces, clip_vision):
         comfy.model_management.load_model_gpu(clip_vision.patcher)
