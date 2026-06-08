@@ -59,16 +59,9 @@ def _build_lora_map(filtered_loras, char_names):
     return lora_map
 
 
-def _parse_inputs(char_tags, lora_list, lora_activation, base_model):
+def _parse_inputs(char_tags, lora_list, base_model):
     char_data = json.loads(char_tags).get("list", [])
     lora_data = json.loads(lora_list).get("list", [])
-    activation_data = json.loads(lora_activation).get("list", [])
-
-    activation_map = {}
-    for entry in activation_data:
-        name = entry.get("CHAR", "").strip()
-        if name:
-            activation_map[name] = entry.get("active", "true").strip().lower() in ("true", "1", "yes")
 
     char_map = {}
     char_names = []
@@ -84,13 +77,13 @@ def _parse_inputs(char_tags, lora_list, lora_activation, base_model):
     filtered_loras = [l for l in lora_data if l.get("BASE", "").strip() == base_model.strip()]
     lora_map = _build_lora_map(filtered_loras, char_names)
 
-    return char_map, char_names, activation_map, lora_map, len(lora_data), len(filtered_loras)
+    return char_map, char_names, lora_map, len(lora_data), len(filtered_loras)
 
 
 def _compute_info(face_context, char_tags, quality_tags, artist_tags,
-                  lora_list, lora_activation, base_model):
-    char_map, char_names, activation_map, lora_map, total_loras, filtered_loras = \
-        _parse_inputs(char_tags, lora_list, lora_activation, base_model)
+                  lora_list, base_model):
+    char_map, char_names, lora_map, total_loras, filtered_loras = \
+        _parse_inputs(char_tags, lora_list, base_model)
 
     lines = [
         f"Base model: {base_model}",
@@ -114,11 +107,6 @@ def _compute_info(face_context, char_tags, quality_tags, artist_tags,
 
         if name == "unknown":
             lines.append(f"Face {i + 1}: unknown (score: {score:.4f}) — SKIPPED")
-            continue
-
-        is_active = activation_map.get(name, True)
-        if not is_active:
-            lines.append(f"Face {i + 1}: {name} — DISABLED")
             continue
 
         tags = char_map.get(name, {})
@@ -192,12 +180,11 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 "clip": ("CLIP",),
                 "vae": ("VAE",),
                 "face_context": ("IPA_FACE_CONTEXT",),
-                "char_tags": ("STRING", {"multiline": True, "default": '{"list":[]}'}),
+                "char_tags": ("STRING", {"multiline": True, "default": '{"list":[{"CHAR":"name","FACE_TAGS":"face tags","EYE_TAGS":"eye tags"}]}'}),
                 "quality_tags": ("STRING", {"default": ""}),
                 "artist_tags": ("STRING", {"default": ""}),
                 "negative": ("STRING", {"multiline": True, "default": ""}),
-                "lora_list": ("STRING", {"multiline": True, "default": '{"list":[]}'}),
-                "lora_activation": ("STRING", {"multiline": True, "default": '{"list":[]}'}),
+                "lora_list": ("STRING", {"multiline": True, "default": '{"list":[{"CHAR":"name","lora_path":"filename.safetensors","str":1.0,"BASE":"anima"}]}'}),
                 "base_model": ("STRING", {"default": "anima"}),
                 "enlarge_factor": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 8.0, "step": 0.1}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
@@ -218,7 +205,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
 
     def execute(self, *, enable, image, model, clip, vae, face_context,
                 char_tags, quality_tags, artist_tags, negative,
-                lora_list, lora_activation, base_model,
+                lora_list, base_model,
                 enlarge_factor, seed, steps, cfg, sampler_name, scheduler,
                 denoise, feather, noise_mask):
 
@@ -228,8 +215,8 @@ class SoyaCharLoraFaceDetailer_mdsoya:
         if not use:
             return (image, torch.zeros((B, H, W), dtype=torch.float32), "DISABLED")
 
-        char_map, char_names, activation_map, lora_map, _, _ = \
-            _parse_inputs(char_tags, lora_list, lora_activation, base_model)
+        char_map, char_names, lora_map, _, _ = \
+            _parse_inputs(char_tags, lora_list, base_model)
 
         if not face_context or not face_context.get("matches"):
             return (image, torch.zeros((B, H, W), dtype=torch.float32),
@@ -256,18 +243,6 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                     log_lines.append(f"  {name} — NO TAGS, SKIPPED")
                     continue
 
-                is_active = activation_map.get(name, True)
-                if not is_active:
-                    log_lines.append(f"  {name} — DISABLED")
-                    continue
-
-                # ── Tags & prompt ───────────────────────────────
-                tags = char_map[name]
-                face_tags = tags["FACE_TAGS"]
-                eye_tags = tags["EYE_TAGS"]
-                parts = [p for p in [quality_tags, artist_tags, face_tags, eye_tags] if p.strip()]
-                prompt = ", ".join(parts)
-
                 # ── LoRA: always start from original model ──────
                 lora_entry = lora_map.get(name)
                 patched_model = model
@@ -283,7 +258,14 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                         )
                         lora_info = f"{os.path.basename(resolved)} @ {strength}"
                     else:
-                        lora_info = "FILE NOT FOUND"
+                        lora_info = f"FILE NOT FOUND: {lora_entry['lora_path']}"
+
+                # ── Tags & prompt ───────────────────────────────
+                tags = char_map[name]
+                face_tags = tags["FACE_TAGS"]
+                eye_tags = tags["EYE_TAGS"]
+                parts = [p for p in [quality_tags, artist_tags, face_tags, eye_tags] if p.strip()]
+                prompt = ", ".join(parts)
 
                 positive_cond = _encode_conditioning(clip, prompt)
 
@@ -379,7 +361,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
 
         info = _compute_info(
             face_context, char_tags, quality_tags, artist_tags,
-            lora_list, lora_activation, base_model,
+            lora_list, base_model,
         )
         info += "\n" + "═" * 50 + "\nProcessing log:\n" + "\n".join(log_lines)
         print(f"[CharLoraFaceDetailer] Processed {len(matches)} faces")
