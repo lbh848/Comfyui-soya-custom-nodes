@@ -5,8 +5,8 @@ For each face in face_context:
   1. Identify character → find matching LoRA (filtered by base_model)
   2. Apply ONLY that character's LoRA to a fresh copy of the original model
   3. Assemble prompt: quality_tags + artist_tags + FACE_TAGS + EYE_TAGS
-  4. Enlarge face region (rounded up to multiple of 8 for VAE decode safety)
-  5. VAE encode → KSampler → VAE decode → resize back → paste with feathering
+  4. Use expanded crop region from face_context (with CROP_TOP/BOTTOM applied)
+  5. VAE encode → KSampler → VAE decode → paste back with feathered mask
 """
 
 import os
@@ -118,7 +118,8 @@ def _compute_info(face_context, char_tags, quality_tags, artist_tags,
         lora_entry = lora_map.get(name)
         lines.append(f"Face {i + 1}: {name}")
         lines.append(f"  Score: {score:.4f}")
-        lines.append(f"  BBox: {bbox}")
+        crop = match.get("crop", bbox)
+        lines.append(f"  Crop: {crop}")
         if lora_entry:
             lines.append(f"  LoRA: {os.path.basename(lora_entry['lora_path'])} @ {lora_entry.get('str', 1.0)}")
         else:
@@ -186,7 +187,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 "negative": ("STRING", {"multiline": True, "default": ""}),
                 "lora_list": ("STRING", {"multiline": True, "default": '{"list":[{"CHAR":"name","lora_path":"filename.safetensors","str":1.0,"BASE":"anima"}]}'}),
                 "base_model": ("STRING", {"default": "anima"}),
-                "enlarge_factor": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 8.0, "step": 0.1}),
+                "crop_expand_factor": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 4.0, "step": 0.1}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
                 "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step": 0.1}),
@@ -206,7 +207,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
     def execute(self, *, enable, image, model, clip, vae, face_context,
                 char_tags, quality_tags, artist_tags, negative,
                 lora_list, base_model,
-                enlarge_factor, seed, steps, cfg, sampler_name, scheduler,
+                crop_expand_factor, seed, steps, cfg, sampler_name, scheduler,
                 denoise, feather, noise_mask):
 
         B, H, W, C = image.shape
@@ -233,7 +234,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
         for batch_idx in range(B):
             for match in matches:
                 name = match["name"]
-                bbox = match["bbox"]
+                crop = match.get("crop", match["bbox"])
 
                 if name == "unknown":
                     log_lines.append(f"  unknown — SKIPPED")
@@ -269,12 +270,14 @@ class SoyaCharLoraFaceDetailer_mdsoya:
 
                 positive_cond = _encode_conditioning(clip, prompt)
 
-                # ── Enlarge face region (crop size = multiple of 8) ──
-                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
-                bw, bh = x2 - x1, y2 - y1
-                cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
-                ew = bw * enlarge_factor
-                eh = bh * enlarge_factor
+                # ── Crop region from face_context (expanded with CROP_TOP/BOTTOM) ──
+                cr_x1, cr_y1, cr_x2, cr_y2 = int(crop[0]), int(crop[1]), int(crop[2]), int(crop[3])
+                cr_w, cr_h = cr_x2 - cr_x1, cr_y2 - cr_y1
+                cr_cx, cr_cy = (cr_x1 + cr_x2) / 2.0, (cr_y1 + cr_y2) / 2.0
+
+                # Apply crop_expand_factor for additional context padding
+                ew = cr_w * crop_expand_factor
+                eh = cr_h * crop_expand_factor
 
                 # Round UP crop dimensions to multiple of 8 before clamping
                 crop_w = ((int(ew) + 7) // 8) * 8
@@ -285,8 +288,8 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                     continue
 
                 # Center the crop, clamp to image bounds
-                cx1 = max(0, int(cx - crop_w / 2))
-                cy1 = max(0, int(cy - crop_h / 2))
+                cx1 = max(0, int(cr_cx - crop_w / 2))
+                cy1 = max(0, int(cr_cy - crop_h / 2))
                 cx2 = cx1 + crop_w
                 cy2 = cy1 + crop_h
 
@@ -309,13 +312,13 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 crop_tensor = image[batch_idx, cy1:cy2, cx1:cx2].clone()
                 crop_tensor = crop_tensor.unsqueeze(0)  # (1, actual_h, actual_w, C)
 
-                # ── Mask from original bbox ─────────────────────
+                # ── Mask from crop region (expanded with CROP_TOP/BOTTOM) ──
                 sx = actual_w / max(1, crop_w)
                 sy = actual_h / max(1, crop_h)
-                local_x1 = max(0, int((x1 - cx1) * sx))
-                local_y1 = max(0, int((y1 - cy1) * sy))
-                local_x2 = min(actual_w, int((x2 - cx1) * sx))
-                local_y2 = min(actual_h, int((y2 - cy1) * sy))
+                local_x1 = max(0, int((cr_x1 - cx1) * sx))
+                local_y1 = max(0, int((cr_y1 - cy1) * sy))
+                local_x2 = min(actual_w, int((cr_x2 - cx1) * sx))
+                local_y2 = min(actual_h, int((cr_y2 - cy1) * sy))
 
                 mask = torch.zeros((actual_h, actual_w), dtype=torch.float32)
                 if local_x2 > local_x1 and local_y2 > local_y1:

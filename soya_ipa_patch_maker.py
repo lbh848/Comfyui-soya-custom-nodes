@@ -169,6 +169,7 @@ class SoyaIPAPatchMaker_mdsoya:
         detected_faces = []
         face_bbox_areas = []
         all_bboxes = []
+        all_crops = []
         img_H, img_W = 0, 0
 
         for img_tensor in image:
@@ -206,6 +207,7 @@ class SoyaIPAPatchMaker_mdsoya:
 
                     detected_faces.append(face_tensor)
                     all_bboxes.append((float(x1), float(y1), float(x2), float(y2)))
+                    all_crops.append((float(nx1), float(ny1), float(nx2), float(ny2)))
                     face_bbox_areas.append((bw * bh, len(detected_faces) - 1))
 
         total_detected = len(detected_faces)
@@ -214,6 +216,7 @@ class SoyaIPAPatchMaker_mdsoya:
             keep_indices = sorted([idx for _, idx in face_bbox_areas[:max_faces]])
             detected_faces = [detected_faces[i] for i in keep_indices]
             all_bboxes = [all_bboxes[i] for i in keep_indices]
+            all_crops = [all_crops[i] for i in keep_indices]
 
         if not detected_faces:
             info = f"No faces detected (YOLO conf: {yolo_conf}, total before filter: {total_detected})"
@@ -296,9 +299,11 @@ class SoyaIPAPatchMaker_mdsoya:
             if name == "unknown":
                 continue
             bbox = all_bboxes[i] if i < len(all_bboxes) else (0, 0, 0, 0)
+            crop = all_crops[i] if i < len(all_crops) else bbox
             face_context["matches"].append({
                 "name": name,
                 "bbox": bbox,
+                "crop": crop,
                 "score": score,
             })
 
