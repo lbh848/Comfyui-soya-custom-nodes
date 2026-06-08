@@ -293,6 +293,8 @@ class SoyaIPAPatchMaker_mdsoya:
             "img_W": img_W,
         }
         for i, (name, score) in enumerate(zip(final_names, final_scores)):
+            if name == "unknown":
+                continue
             bbox = all_bboxes[i] if i < len(all_bboxes) else (0, 0, 0, 0)
             face_context["matches"].append({
                 "name": name,
