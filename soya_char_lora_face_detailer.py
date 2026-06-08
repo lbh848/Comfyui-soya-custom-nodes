@@ -362,9 +362,14 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 enhanced = vae.decode(refined_latent)
 
                 # ── Downscale back to target size ──
+                # vae.decode returns (B, H, W, C); squeeze batch dim
                 enhanced_crop = enhanced[0].clamp(0, 1)
+                while enhanced_crop.dim() > 3:
+                    enhanced_crop = enhanced_crop[0]
+
                 if upscale_factor > 1.0 and (enhanced_crop.shape[1] != actual_w or enhanced_crop.shape[0] != actual_h):
-                    enhanced_pil = Image.fromarray((enhanced_crop.cpu().numpy() * 255).astype(np.uint8))
+                    enhanced_np = (enhanced_crop.cpu().numpy() * 255).astype(np.uint8)
+                    enhanced_pil = Image.fromarray(enhanced_np)
                     enhanced_pil = enhanced_pil.resize((actual_w, actual_h), Image.Resampling.LANCZOS)
                     enhanced_crop = torch.from_numpy(np.array(enhanced_pil).astype(np.float32) / 255.0)
 
