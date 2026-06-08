@@ -361,6 +361,19 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 cy1 = max(0, cy1)
                 cx2 = min(W, cx2)
                 cy2 = min(H, cy2)
+
+                # Ensure crop fully contains the original face region (8-aligned)
+                # 8-alignment can shift the crop so original area pokes out at edges
+                cx1 = min(cx1, (cr_x1 // 8) * 8)
+                cy1 = min(cy1, (cr_y1 // 8) * 8)
+                cx2 = max(cx2, ((cr_x2 + 7) // 8) * 8)
+                cy2 = max(cy2, ((cr_y2 + 7) // 8) * 8)
+
+                # Re-clamp after containment expansion
+                cx1 = max(0, cx1)
+                cy1 = max(0, cy1)
+                cx2 = min(W, cx2)
+                cy2 = min(H, cy2)
                 actual_w, actual_h = cx2 - cx1, cy2 - cy1
 
                 # ── Crop from original image ──
