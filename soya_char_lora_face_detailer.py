@@ -102,7 +102,7 @@ def _compute_info(face_context, char_tags, quality_tags, artist_tags,
 
     for i, match in enumerate(matches):
         name = match["name"]
-        bbox = match["bbox"]
+        crop = match["crop"]
         score = match["score"]
 
         if name == "unknown":
@@ -118,7 +118,6 @@ def _compute_info(face_context, char_tags, quality_tags, artist_tags,
         lora_entry = lora_map.get(name)
         lines.append(f"Face {i + 1}: {name}")
         lines.append(f"  Score: {score:.4f}")
-        crop = match.get("crop", bbox)
         lines.append(f"  Crop: {crop}")
         if lora_entry:
             lines.append(f"  LoRA: {os.path.basename(lora_entry['lora_path'])} @ {lora_entry.get('str', 1.0)}")
@@ -234,7 +233,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
         for batch_idx in range(B):
             for match in matches:
                 name = match["name"]
-                crop = match.get("crop", match["bbox"])
+                crop = match["crop"]
 
                 if name == "unknown":
                     log_lines.append(f"  unknown — SKIPPED")

@@ -298,8 +298,8 @@ class SoyaIPAPatchMaker_mdsoya:
         for i, (name, score) in enumerate(zip(final_names, final_scores)):
             if name == "unknown":
                 continue
-            bbox = all_bboxes[i] if i < len(all_bboxes) else (0, 0, 0, 0)
-            crop = all_crops[i] if i < len(all_crops) else bbox
+            bbox = all_bboxes[i]
+            crop = all_crops[i]
             face_context["matches"].append({
                 "name": name,
                 "bbox": bbox,
