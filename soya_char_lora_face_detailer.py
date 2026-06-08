@@ -5,14 +5,17 @@ For each face in face_context:
   1. Identify character → find matching LoRA (filtered by base_model)
   2. Apply ONLY that character's LoRA to a fresh copy of the original model
   3. Assemble prompt: quality_tags + artist_tags + FACE_TAGS + EYE_TAGS
-  4. Use expanded crop region from face_context (with CROP_TOP/BOTTOM applied)
-  5. VAE encode → KSampler → VAE decode → paste back with feathered mask
+  4. Crop face region from image (8-aligned coords, crop_expand_factor padding)
+  5. Upscale crop by upscale_factor for higher-resolution processing
+  6. VAE encode → KSampler → VAE decode → downscale back → paste with feathered mask
 """
 
 import os
 import json
 import torch
 import torch.nn.functional as F
+import numpy as np
+from PIL import Image
 import comfy.sd
 import comfy.utils
 import folder_paths
@@ -187,6 +190,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 "lora_list": ("STRING", {"multiline": True, "default": '{"list":[{"CHAR":"name","lora_path":"filename.safetensors","str":1.0,"BASE":"anima"}]}'}),
                 "base_model": ("STRING", {"default": "anima"}),
                 "crop_expand_factor": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 4.0, "step": 0.1}),
+                "upscale_factor": ("FLOAT", {"default": 1.2, "min": 1.0, "max": 4.0, "step": 0.05}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
                 "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step": 0.1}),
@@ -206,7 +210,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
     def execute(self, *, enable, image, model, clip, vae, face_context,
                 char_tags, quality_tags, artist_tags, negative,
                 lora_list, base_model,
-                crop_expand_factor, seed, steps, cfg, sampler_name, scheduler,
+                crop_expand_factor, upscale_factor, seed, steps, cfg, sampler_name, scheduler,
                 denoise, feather, noise_mask):
 
         B, H, W, C = image.shape
@@ -278,7 +282,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 ew = cr_w * crop_expand_factor
                 eh = cr_h * crop_expand_factor
 
-                # Round UP crop dimensions to multiple of 8 before clamping
+                # Round UP crop dimensions to multiple of 8
                 crop_w = ((int(ew) + 7) // 8) * 8
                 crop_h = ((int(eh) + 7) // 8) * 8
 
@@ -286,19 +290,19 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                     log_lines.append(f"  {name} — crop too small ({crop_w}x{crop_h})")
                     continue
 
-                # Center the crop, clamp to image bounds
-                cx1 = max(0, int(cr_cx - crop_w / 2))
-                cy1 = max(0, int(cr_cy - crop_h / 2))
+                # Center the crop, align start to multiple of 8
+                cx1 = (int(cr_cx - crop_w / 2) // 8) * 8
+                cy1 = (int(cr_cy - crop_h / 2) // 8) * 8
                 cx2 = cx1 + crop_w
                 cy2 = cy1 + crop_h
 
-                # If crop extends past image edge, shift origin left/up
+                # Shift left/up if extends past image edge (re-align to 8)
                 if cx2 > W:
-                    cx1 = W - crop_w
-                    cx2 = W
+                    cx1 = max(0, (W - crop_w) // 8 * 8)
+                    cx2 = cx1 + crop_w
                 if cy2 > H:
-                    cy1 = H - crop_h
-                    cy2 = H
+                    cy1 = max(0, (H - crop_h) // 8 * 8)
+                    cy2 = cy1 + crop_h
 
                 # Final clamp (crop may be larger than image)
                 cx1 = max(0, cx1)
@@ -307,11 +311,10 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 cy2 = min(H, cy2)
                 actual_w, actual_h = cx2 - cx1, cy2 - cy1
 
-                # ── Crop (already 8-aligned, no resize needed) ──
+                # ── Crop from original image ──
                 crop_tensor = image[batch_idx, cy1:cy2, cx1:cx2].clone()
-                crop_tensor = crop_tensor.unsqueeze(0)  # (1, actual_h, actual_w, C)
 
-                # ── Mask from crop region (expanded with CROP_TOP/BOTTOM) ──
+                # ── Mask from crop region ──
                 sx = actual_w / max(1, crop_w)
                 sy = actual_h / max(1, crop_h)
                 local_x1 = max(0, int((cr_x1 - cx1) * sx))
@@ -326,9 +329,26 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 if feather > 0:
                     mask = _gaussian_blur_gpu(mask, feather)
 
-                mask_batch = mask.unsqueeze(0)
+                # ── Upscale for processing ──
+                if upscale_factor > 1.0:
+                    process_w = ((int(actual_w * upscale_factor) + 7) // 8) * 8
+                    process_h = ((int(actual_h * upscale_factor) + 7) // 8) * 8
 
-                # ── FD: VAE encode → KSampler → VAE decode ─────
+                    crop_pil = Image.fromarray((crop_tensor.cpu().numpy() * 255).astype(np.uint8))
+                    crop_pil = crop_pil.resize((process_w, process_h), Image.Resampling.LANCZOS)
+                    crop_tensor = torch.from_numpy(np.array(crop_pil).astype(np.float32) / 255.0)
+                    crop_tensor = crop_tensor.unsqueeze(0)  # (1, process_h, process_w, C)
+
+                    mask_pil = Image.fromarray((mask.cpu().numpy() * 255).astype(np.uint8))
+                    mask_pil = mask_pil.resize((process_w, process_h), Image.Resampling.LANCZOS)
+                    process_mask = torch.from_numpy(np.array(mask_pil).astype(np.float32) / 255.0)
+                    mask_batch = process_mask.unsqueeze(0)
+                else:
+                    process_w, process_h = actual_w, actual_h
+                    crop_tensor = crop_tensor.unsqueeze(0)  # (1, actual_h, actual_w, C)
+                    mask_batch = mask.unsqueeze(0)
+
+                # ── VAE encode → KSampler → VAE decode ──
                 latent = vae.encode(crop_tensor[:, :, :, :3])
                 latent_dict = {"samples": latent}
                 if noise_mask:
@@ -341,10 +361,14 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 )
                 enhanced = vae.decode(refined_latent)
 
-                # ── Paste back with feather ──────────────────────
+                # ── Downscale back to target size ──
                 enhanced_crop = enhanced[0].clamp(0, 1)
+                if upscale_factor > 1.0 and (enhanced_crop.shape[1] != actual_w or enhanced_crop.shape[0] != actual_h):
+                    enhanced_pil = Image.fromarray((enhanced_crop.cpu().numpy() * 255).astype(np.uint8))
+                    enhanced_pil = enhanced_pil.resize((actual_w, actual_h), Image.Resampling.LANCZOS)
+                    enhanced_crop = torch.from_numpy(np.array(enhanced_pil).astype(np.float32) / 255.0)
 
-                # ── Paste back with feather ──────────────────────
+                # ── Paste back with feathered mask ──
                 alpha = mask.unsqueeze(-1)
                 result_image[batch_idx, cy1:cy2, cx1:cx2] = (
                     alpha * enhanced_crop
@@ -357,6 +381,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 log_lines.append(
                     f"  {name} | LoRA: {lora_info} | "
                     f"crop: {actual_w}x{actual_h} | "
+                    f"process: {process_w}x{process_h} | "
                     f"Prompt: {prompt}"
                 )
                 seed += 1
