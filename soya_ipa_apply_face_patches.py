@@ -38,6 +38,7 @@ class SoyaIPAApplyFacePatches_mdsoya:
                 "start_at": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "end_at": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "embeds_scaling": (["V only", "K+V", "K+V w/ C penalty", "K+mean(V) w/ C penalty"],),
+                "enabled": ("STRING", {"default": "true", "multiline": False}),
             },
         }
 
@@ -49,7 +50,13 @@ class SoyaIPAApplyFacePatches_mdsoya:
 
     def process(self, face_context, model, ipadapter, clip_vision,
                 feather_radius, mask_expansion,
-                weight_type, start_at, end_at, embeds_scaling):
+                weight_type, start_at, end_at, embeds_scaling, enabled):
+
+        if enabled == "false":
+            img_H = face_context.get("img_H", 0) if face_context else 0
+            img_W = face_context.get("img_W", 0) if face_context else 0
+            h, w = (img_H, img_W) if img_H and img_W else (1, 1)
+            return (model, [], torch.zeros(1, h, w), [], "Disabled.")
 
         if not face_context or not face_context.get("matches"):
             return (model, [], torch.zeros(1, 1, 1), [], "No face context provided.")
