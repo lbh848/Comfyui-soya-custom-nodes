@@ -240,6 +240,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
                 "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step": 0.1}),
+                "detail_cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0, "step": 0.1}),
                 "denoise": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
@@ -257,8 +258,9 @@ class SoyaCharLoraFaceDetailer_mdsoya:
     def execute(self, *, enable, image, model, clip, vae, face_context,
                 char_tags, quality_tags, artist_tags, negative,
                 lora_list, base_model,
-                crop_expand_factor, upscale_factor, seed, steps, cfg, sampler_name, scheduler,
-                denoise, feather, corner_roundness, noise_mask):
+                crop_expand_factor, upscale_factor, seed, steps, cfg, detail_cfg,
+                denoise, sampler_name, scheduler,
+                feather, corner_roundness, noise_mask):
 
         B, H, W, C = image.shape
         use = enable.strip().lower() in ("true", "1", "yes")
