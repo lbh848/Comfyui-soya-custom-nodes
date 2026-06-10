@@ -46,13 +46,23 @@ def _load_clip_vision(model_name, device):
     gc.collect()
 
     clip_path = folder_paths.get_full_path_or_raise("clip_vision", model_name)
-    clip_v = comfy.clip_vision.load(clip_path)
 
     if device == "CPU":
+        # Patch ComfyUI's device detection so it loads directly to CPU,
+        # avoiding a GPU allocation that would cause OOM before we can move it.
+        _orig_ted = comfy.model_management.text_encoder_device
+        comfy.model_management.text_encoder_device = lambda: torch.device("cpu")
+        try:
+            clip_v = comfy.clip_vision.load(clip_path)
+        finally:
+            comfy.model_management.text_encoder_device = _orig_ted
+
         dev = torch.device("cpu")
         clip_v.load_device = dev
         clip_v.offload_device = dev
         clip_v.patcher.model = clip_v.patcher.model.to(dev)
+    else:
+        clip_v = comfy.clip_vision.load(clip_path)
 
     _main_clip_cache[key] = clip_v
     return clip_v
@@ -222,63 +232,66 @@ class SoyaIPAPatchMaker_mdsoya:
             info = f"No faces detected (YOLO conf: {yolo_conf}, total before filter: {total_detected})"
             return ([], [], [], info, {})
 
-        # ── STEP 2: CLIP Vision encode detected faces ──
-        n_workers = min(num_cpus, len(detected_faces))
-        use_ray = n_workers > 1
-        ray_fallback_error = None
-        if use_ray:
-            try:
-                face_embeds = self._encode_parallel(detected_faces, clip_model_name, n_workers)
-            except Exception as e:
-                ray_fallback_error = str(e)
-                print(f"[IPAPatchMaker] Ray parallel encoding failed ({e}), falling back to sequential")
+        # ── Fast path: single face + single character → skip embedding entirely ──
+        if len(detected_faces) == 1 and len(char_names) == 1:
+            final_names = [char_names[0]]
+            final_scores = [1.0]
+            encode_mode = "direct (1:1)"
+        else:
+            # ── STEP 2: CLIP Vision encode detected faces ──
+            n_workers = min(num_cpus, len(detected_faces))
+            use_ray = n_workers > 1
+            ray_fallback_error = None
+            encode_mode = "sequential"
+            if use_ray:
+                try:
+                    face_embeds = self._encode_parallel(detected_faces, clip_model_name, n_workers)
+                    encode_mode = f"Ray x{n_workers}"
+                except Exception as e:
+                    ray_fallback_error = str(e)
+                    encode_mode = f"Ray x{n_workers} FAILED -> sequential ({ray_fallback_error})"
+                    print(f"[IPAPatchMaker] Ray parallel encoding failed ({e}), falling back to sequential")
+                    clip_vision = _load_clip_vision(clip_model_name, device)
+                    face_embeds = self._encode_sequential(detected_faces, clip_vision)
+            else:
                 clip_vision = _load_clip_vision(clip_model_name, device)
                 face_embeds = self._encode_sequential(detected_faces, clip_vision)
-        else:
-            clip_vision = _load_clip_vision(clip_model_name, device)
-            face_embeds = self._encode_sequential(detected_faces, clip_vision)
 
-        face_embeds = torch.cat(face_embeds, dim=0)
+            face_embeds = torch.cat(face_embeds, dim=0)
 
-        # ── STEP 3: Load cached embeddings + Hungarian matching ──
-        char_embeds = {}
-        for entry in embed_caches:
-            char_name = entry["CHAR"]
-            emb_path = os.path.join(input_dir, entry["emb_path"])
-            cache = torch.load(emb_path, map_location="cpu", weights_only=True)
-            embeds = cache["embeds"]
-            if embeds.dim() > 2:
-                embeds = embeds.view(embeds.size(0), -1)
-            char_embeds[char_name] = embeds
+            # ── STEP 3: Load cached embeddings + Hungarian matching ──
+            char_embeds = {}
+            for entry in embed_caches:
+                char_name = entry["CHAR"]
+                emb_path = os.path.join(input_dir, entry["emb_path"])
+                cache = torch.load(emb_path, map_location="cpu", weights_only=True)
+                embeds = cache["embeds"]
+                if embeds.dim() > 2:
+                    embeds = embeds.view(embeds.size(0), -1)
+                char_embeds[char_name] = embeds
 
-        M = face_embeds.shape[0]
-        N = len(char_names)
-        sim_matrix = torch.zeros(M, N)
+            M = face_embeds.shape[0]
+            N = len(char_names)
+            sim_matrix = torch.zeros(M, N)
 
-        for j, char_name in enumerate(char_names):
-            if char_name not in char_embeds:
-                continue
-            char_embs = char_embeds[char_name]
-            for i in range(M):
-                sims = F.cosine_similarity(face_embeds[i].unsqueeze(0), char_embs, dim=1)
-                sim_matrix[i, j] = sims.max().item()
+            for j, char_name in enumerate(char_names):
+                if char_name not in char_embeds:
+                    continue
+                char_embs = char_embeds[char_name]
+                for i in range(M):
+                    sims = F.cosine_similarity(face_embeds[i].unsqueeze(0), char_embs, dim=1)
+                    sim_matrix[i, j] = sims.max().item()
 
-        row_ind, col_ind = linear_sum_assignment(-sim_matrix.cpu().numpy())
+            row_ind, col_ind = linear_sum_assignment(-sim_matrix.cpu().numpy())
 
-        final_names = ["unknown"] * M
-        final_scores = [0.0] * M
-        for r, c in zip(row_ind, col_ind):
-            if c < N:
-                final_names[r] = char_names[c]
-                final_scores[r] = float(sim_matrix[r, c].item())
+            final_names = ["unknown"] * M
+            final_scores = [0.0] * M
+            for r, c in zip(row_ind, col_ind):
+                if c < N:
+                    final_names[r] = char_names[c]
+                    final_scores[r] = float(sim_matrix[r, c].item())
 
         matched_count = sum(1 for n in final_names if n != "unknown")
-        if ray_fallback_error:
-            encode_mode = f"Ray x{n_workers} FAILED -> sequential ({ray_fallback_error})"
-        elif use_ray:
-            encode_mode = f"Ray x{n_workers}"
-        else:
-            encode_mode = "sequential"
         info_lines = [
             f"Detected {total_detected} face(s), kept {len(detected_faces)}, "
             f"matched {matched_count} [{encode_mode}]",

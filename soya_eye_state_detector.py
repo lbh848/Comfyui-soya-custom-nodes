@@ -14,6 +14,7 @@ Outputs:
 import numpy as np
 import torch
 import time
+from scipy.ndimage import label as ndimage_label
 
 
 class SoyaEyeStateDetector_mdsoya:
@@ -88,10 +89,12 @@ class SoyaEyeStateDetector_mdsoya:
                 "eye_mask": None,
                 "eyebrow_mask": None,
                 "overlap_ratio": 0.0,
+                "per_eye_ratios": [],
             }
 
             if x2 <= x1 or y2 <= y1:
                 ratios.append(0.0)
+                face_data["per_eye_ratios"] = []
                 info_lines.append(f"  {name}: ratio=0.0000 (invalid bbox)")
                 print(f"[EyeState] {name}: invalid bbox ({x1},{y1},{x2},{y2})")
                 faces.append(face_data)
@@ -106,6 +109,7 @@ class SoyaEyeStateDetector_mdsoya:
             eye_area = float(eye_binary.sum())
             if eye_area == 0:
                 ratios.append(0.0)
+                face_data["per_eye_ratios"] = []
                 info_lines.append(f"  {name}: ratio=0.0000 (no eye detected)")
                 print(f"[EyeState] {name}: no eye pixels detected")
                 face_data["eye_mask"] = eye_binary
@@ -130,8 +134,29 @@ class SoyaEyeStateDetector_mdsoya:
             face_data["eyebrow_mask"] = eb_mask_float
             face_data["overlap_ratio"] = ratio
 
+            # ── Per-eye overlap ratios (top 2 connected components) ──
+            labeled, num_features = ndimage_label(eye_binary)
+            component_data = []
+            for cid in range(1, num_features + 1):
+                cmask = (labeled == cid).astype(np.uint8)
+                carea = int(cmask.sum())
+                if carea > 0:
+                    component_data.append((carea, cmask))
+
+            component_data.sort(key=lambda x: x[0], reverse=True)
+            top2 = component_data[:2]
+
+            per_eye_ratios = []
+            for carea, cmask in top2:
+                coverlap = (cmask & eb_binary).astype(np.float32)
+                cratio = float(coverlap.sum()) / float(carea)
+                per_eye_ratios.append(cratio)
+
+            face_data["per_eye_ratios"] = per_eye_ratios
+
+            per_eye_str = ", ".join(f"{r:.4f}" for r in per_eye_ratios) if per_eye_ratios else "n/a"
             info_lines.append(
-                f"  {name}: ratio={ratio:.4f} "
+                f"  {name}: ratio={ratio:.4f} per_eye=[{per_eye_str}] "
                 f"(eye={int(eye_area)}, overlap={int(overlap.sum())})"
             )
             faces.append(face_data)
@@ -153,6 +178,7 @@ class SoyaEyeStateDetector_mdsoya:
             "eye_mask": None,
             "eyebrow_mask": None,
             "overlap_ratio": 0.0,
+            "per_eye_ratios": [],
         }
 
     @staticmethod
