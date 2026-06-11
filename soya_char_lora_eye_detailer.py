@@ -76,6 +76,8 @@ def _parse_inputs(char_tags, lora_list, base_model):
         if name:
             char_map[name] = {
                 "EYE_TAGS": entry.get("EYE_TAGS", ""),
+                "TRIGGER_ANIMA": entry.get("TRIGGER_ANIMA", ""),
+                "TRIGGER_SDXL": entry.get("TRIGGER_SDXL", ""),
             }
             char_names.append(name)
 
@@ -332,7 +334,9 @@ class SoyaCharLoraEyeDetailer_mdsoya:
                 # ── Tags & prompt (EYE_TAGS only) ───────────────
                 tags = char_map[name]
                 eye_tags = tags["EYE_TAGS"]
-                parts = [p for p in [quality_tags, artist_tags, eye_tags] if p.strip()]
+                trigger_key = "TRIGGER_ANIMA" if base_model.strip() == "anima" else "TRIGGER_SDXL"
+                trigger = tags.get(trigger_key, "").strip()
+                parts = [p for p in [trigger, quality_tags, artist_tags, eye_tags] if p.strip()]
                 prompt = ", ".join(parts)
 
                 positive_cond = _encode_conditioning(clip, prompt)
@@ -559,7 +563,9 @@ class SoyaCharLoraEyeDetailer_mdsoya:
                 continue
             tags = char_map[name]
             eye_tags = tags["EYE_TAGS"]
-            parts = [p for p in [quality_tags, artist_tags, eye_tags] if p.strip()]
+            trigger_key = "TRIGGER_ANIMA" if base_model.strip() == "anima" else "TRIGGER_SDXL"
+            trigger = tags.get(trigger_key, "").strip()
+            parts = [p for p in [trigger, quality_tags, artist_tags, eye_tags] if p.strip()]
             prompt = ", ".join(parts)
             lora_entry = lora_map.get(name)
             info_lines.append(f"Face {match_idx + 1}: {name}")

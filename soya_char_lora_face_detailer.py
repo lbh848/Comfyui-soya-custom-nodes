@@ -75,6 +75,8 @@ def _parse_inputs(char_tags, lora_list, base_model):
                 "FACE_TAGS": entry.get("FACE_TAGS", ""),
                 "EYE_TAGS": entry.get("EYE_TAGS", ""),
                 "POSITIVE": entry.get("POSITIVE", ""),
+                "TRIGGER_ANIMA": entry.get("TRIGGER_ANIMA", ""),
+                "TRIGGER_SDXL": entry.get("TRIGGER_SDXL", ""),
             }
             char_names.append(name)
 
@@ -117,7 +119,9 @@ def _compute_info(face_context, char_tags, quality_tags, artist_tags,
         face_tags = tags.get("FACE_TAGS", "")
         eye_tags = tags.get("EYE_TAGS", "")
         positive_tags = tags.get("POSITIVE", "")
-        parts = [p for p in [quality_tags, artist_tags, face_tags, eye_tags, positive_tags] if p.strip()]
+        trigger_key = "TRIGGER_ANIMA" if base_model.strip() == "anima" else "TRIGGER_SDXL"
+        trigger = tags.get(trigger_key, "").strip()
+        parts = [p for p in [trigger, quality_tags, artist_tags, face_tags, eye_tags, positive_tags] if p.strip()]
         prompt = ", ".join(parts)
 
         lora_entry = lora_map.get(name)
@@ -323,7 +327,9 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 face_tags = tags["FACE_TAGS"]
                 eye_tags = tags["EYE_TAGS"]
                 positive_tags = tags["POSITIVE"]
-                parts = [p for p in [quality_tags, artist_tags, face_tags, eye_tags, positive_tags] if p.strip()]
+                trigger_key = "TRIGGER_ANIMA" if base_model.strip() == "anima" else "TRIGGER_SDXL"
+                trigger = tags.get(trigger_key, "").strip()
+                parts = [p for p in [trigger, quality_tags, artist_tags, face_tags, eye_tags, positive_tags] if p.strip()]
                 prompt = ", ".join(parts)
 
                 positive_cond = _encode_conditioning(clip, prompt)
