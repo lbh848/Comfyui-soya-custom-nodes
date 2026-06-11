@@ -132,45 +132,51 @@ class SoyaIPAPatchMaker_mdsoya:
         if not char_names:
             return ([], [], [], "No character names provided.")
 
-        # Parse ipa_cache_data → per-character IPA embeds
-        ipa_parsed = _parse_json_stream(ipa_cache_data)
-        ipa_caches = []
-        for obj in ipa_parsed:
-            if isinstance(obj, dict) and "list" in obj:
-                ipa_caches.extend(obj["list"])
-            elif isinstance(obj, list):
-                ipa_caches.extend(obj)
+        is_asset_mode = "asset_mode" in char_names
 
-        input_dir = folder_paths.get_input_directory()
-        ipa_embeds_by_char = {}
-        for entry in ipa_caches:
-            char_name = entry["CHAR"]
-            ipa_path = entry["ipa_path"]
-            strength = entry.get("str", 0.7)
+        if is_asset_mode:
+            ipa_embeds_by_char = {}
+            embed_caches = []
+        else:
+            # Parse ipa_cache_data → per-character IPA embeds
+            ipa_parsed = _parse_json_stream(ipa_cache_data)
+            ipa_caches = []
+            for obj in ipa_parsed:
+                if isinstance(obj, dict) and "list" in obj:
+                    ipa_caches.extend(obj["list"])
+                elif isinstance(obj, list):
+                    ipa_caches.extend(obj)
 
-            if not os.path.isabs(ipa_path):
-                ipa_path = os.path.join(input_dir, ipa_path)
-            if not os.path.isfile(ipa_path):
-                print(f"[IPAPatchMaker] WARNING: IPA cache not found for {char_name}: {ipa_path}")
-                continue
+            input_dir = folder_paths.get_input_directory()
+            ipa_embeds_by_char = {}
+            for entry in ipa_caches:
+                char_name = entry["CHAR"]
+                ipa_path = entry["ipa_path"]
+                strength = entry.get("str", 0.7)
 
-            raw = torch.load(ipa_path, map_location="cpu", weights_only=True)
-            ipa_embeds_by_char[char_name] = {
-                "embeds": _combine_embeds(raw, combine_method),
-                "strength": strength,
-            }
+                if not os.path.isabs(ipa_path):
+                    ipa_path = os.path.join(input_dir, ipa_path)
+                if not os.path.isfile(ipa_path):
+                    print(f"[IPAPatchMaker] WARNING: IPA cache not found for {char_name}: {ipa_path}")
+                    continue
 
-        # Parse embed_cache_data — may be single JSON or concatenated
-        embed_parsed = _parse_json_stream(embed_cache_data)
-        embed_caches = []
-        for obj in embed_parsed:
-            if isinstance(obj, dict) and "list" in obj:
-                embed_caches.extend(obj["list"])
-            elif isinstance(obj, list):
-                embed_caches.extend(obj)
+                raw = torch.load(ipa_path, map_location="cpu", weights_only=True)
+                ipa_embeds_by_char[char_name] = {
+                    "embeds": _combine_embeds(raw, combine_method),
+                    "strength": strength,
+                }
 
-        if not embed_caches:
-            return ([], [], [], "No embed cache entries provided.", {})
+            # Parse embed_cache_data — may be single JSON or concatenated
+            embed_parsed = _parse_json_stream(embed_cache_data)
+            embed_caches = []
+            for obj in embed_parsed:
+                if isinstance(obj, dict) and "list" in obj:
+                    embed_caches.extend(obj["list"])
+                elif isinstance(obj, list):
+                    embed_caches.extend(obj)
+
+            if not embed_caches:
+                return ([], [], [], "No embed cache entries provided.", {})
 
         # ── STEP 1: YOLO face detection + crop ──
         yolo = bbox_detector.bbox_model
@@ -232,8 +238,18 @@ class SoyaIPAPatchMaker_mdsoya:
             info = f"No faces detected (YOLO conf: {yolo_conf}, total before filter: {total_detected})"
             return ([], [], [], info, {})
 
-        # ── Fast path: single face + single character → skip embedding entirely ──
-        if len(detected_faces) == 1 and len(char_names) == 1:
+        # ── Asset mode: pick only the largest face, name it "asset_mode" ──
+        if "asset_mode" in char_names:
+            largest_idx = max(range(len(detected_faces)),
+                              key=lambda i: (all_bboxes[i][2] - all_bboxes[i][0]) *
+                                            (all_bboxes[i][3] - all_bboxes[i][1]))
+            detected_faces = [detected_faces[largest_idx]]
+            all_bboxes = [all_bboxes[largest_idx]]
+            all_crops = [all_crops[largest_idx]]
+            final_names = ["asset_mode"]
+            final_scores = [1.0]
+            encode_mode = "asset_mode (largest face)"
+        elif len(detected_faces) == 1 and len(char_names) == 1:
             final_names = [char_names[0]]
             final_scores = [1.0]
             encode_mode = "direct (1:1)"

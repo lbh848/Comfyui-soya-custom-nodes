@@ -58,8 +58,9 @@ def _extract_char_from_path(path, char_names):
 def _build_lora_map(filtered_loras, char_names):
     lora_map = {}
     for entry in filtered_loras:
-        path = entry.get("lora_path", "")
-        char = _extract_char_from_path(path, char_names)
+        char = entry.get("CHAR", "").strip()
+        if not char:
+            char = _extract_char_from_path(entry.get("lora_path", ""), char_names)
         if char and char not in lora_map:
             lora_map[char] = entry
     return lora_map
