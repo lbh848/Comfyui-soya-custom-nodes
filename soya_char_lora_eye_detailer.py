@@ -4,7 +4,7 @@ SoyaCharLoraEyeDetailer – Per-face eye detailer with character-specific LoRA p
 For each face in face_context:
   1. Identify character → find matching LoRA (filtered by base_model)
   2. Apply ONLY that character's LoRA to a fresh copy of the original model
-  3. Assemble prompt: quality_tags + artist_tags + EYE_TAGS
+  3. Assemble prompt: artist_tags + quality_tags + EYE_TAGS
   4. Crop face region from image (8-aligned coords, crop_expand_factor padding)
   5. Build eye inpainting mask from eye_context (eye - eyebrow)
   6. Upscale crop by upscale_factor for higher-resolution processing
@@ -337,7 +337,7 @@ class SoyaCharLoraEyeDetailer_mdsoya:
                 eye_tags = tags["EYE_TAGS"]
                 trigger_key = "TRIGGER_ANIMA" if base_model.strip() == "anima" else "TRIGGER_SDXL"
                 trigger = tags.get(trigger_key, "").strip()
-                parts = [p for p in [trigger, quality_tags, artist_tags, eye_tags] if p.strip()]
+                parts = [p for p in [trigger, artist_tags, quality_tags, eye_tags] if p.strip()]
                 prompt = ", ".join(parts)
 
                 positive_cond = _encode_conditioning(clip, prompt)
@@ -566,7 +566,7 @@ class SoyaCharLoraEyeDetailer_mdsoya:
             eye_tags = tags["EYE_TAGS"]
             trigger_key = "TRIGGER_ANIMA" if base_model.strip() == "anima" else "TRIGGER_SDXL"
             trigger = tags.get(trigger_key, "").strip()
-            parts = [p for p in [trigger, quality_tags, artist_tags, eye_tags] if p.strip()]
+            parts = [p for p in [trigger, artist_tags, quality_tags, eye_tags] if p.strip()]
             prompt = ", ".join(parts)
             lora_entry = lora_map.get(name)
             info_lines.append(f"Face {match_idx + 1}: {name}")

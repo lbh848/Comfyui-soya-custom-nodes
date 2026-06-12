@@ -4,7 +4,7 @@ SoyaCharLoraFaceDetailer – Per-face detailer with character-specific LoRA patc
 For each face in face_context:
   1. Identify character → find matching LoRA (filtered by base_model)
   2. Apply ONLY that character's LoRA to a fresh copy of the original model
-  3. Assemble prompt: quality_tags + artist_tags + FACE_TAGS + EYE_TAGS + POSITIVE
+  3. Assemble prompt: artist_tags + quality_tags + FACE_TAGS + EYE_TAGS + POSITIVE
   4. Crop face region from image (8-aligned coords, crop_expand_factor padding)
   5. Upscale crop by upscale_factor for higher-resolution processing
   6. VAE encode → KSampler → VAE decode → downscale back → paste with feathered mask
@@ -122,7 +122,7 @@ def _compute_info(face_context, char_tags, quality_tags, artist_tags,
         positive_tags = tags.get("POSITIVE", "")
         trigger_key = "TRIGGER_ANIMA" if base_model.strip() == "anima" else "TRIGGER_SDXL"
         trigger = tags.get(trigger_key, "").strip()
-        parts = [p for p in [trigger, quality_tags, artist_tags, face_tags, eye_tags, positive_tags] if p.strip()]
+        parts = [p for p in [trigger, artist_tags, quality_tags, face_tags, eye_tags, positive_tags] if p.strip()]
         prompt = ", ".join(parts)
 
         lora_entry = lora_map.get(name)
@@ -330,7 +330,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 positive_tags = tags["POSITIVE"]
                 trigger_key = "TRIGGER_ANIMA" if base_model.strip() == "anima" else "TRIGGER_SDXL"
                 trigger = tags.get(trigger_key, "").strip()
-                parts = [p for p in [trigger, quality_tags, artist_tags, face_tags, eye_tags, positive_tags] if p.strip()]
+                parts = [p for p in [trigger, artist_tags, quality_tags, face_tags, eye_tags, positive_tags] if p.strip()]
                 prompt = ", ".join(parts)
 
                 positive_cond = _encode_conditioning(clip, prompt)
