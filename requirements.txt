@@ -1,3 +1,4 @@
+onnxruntime
 deepdanbooru_onnx
 ray
 spandrel
