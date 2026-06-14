@@ -130,7 +130,7 @@ class SoyaIPAPatchMaker_mdsoya:
         # Parse inputs
         char_names = [n.strip() for n in character_names.split(",") if n.strip()]
         if not char_names:
-            return ([], [], [], "No character names provided.")
+            return ([], [], [], "No character names provided.", {})
 
         is_asset_mode = "asset_mode" in char_names
 
