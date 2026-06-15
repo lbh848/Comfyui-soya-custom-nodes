@@ -66,6 +66,37 @@ def _build_lora_map(filtered_loras, char_names):
     return lora_map
 
 
+def _resolve_upscale_factor(lora_entry, upscale_factor, actual_w, actual_h):
+    """Per-face effective upscale factor.
+
+    UPSCALE_SIZE in the LoRA entry (e.g. "1024") sets the target size of the
+    crop's longest side. Falls back to upscale_factor when missing/empty/invalid
+    or when the crop already meets the target.
+    """
+    raw = (lora_entry or {}).get("UPSCALE_SIZE", "")
+    if isinstance(raw, (int, float)):
+        target = float(raw)
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            target = float(raw.strip())
+        except ValueError:
+            return upscale_factor, "factor"
+    else:
+        return upscale_factor, "factor"
+
+    if target <= 0:
+        return upscale_factor, "factor"
+
+    longest = float(max(actual_w, actual_h))
+    if longest <= 0:
+        return upscale_factor, "factor"
+
+    size_factor = target / longest
+    if size_factor <= 1.0:
+        return 1.0, f"size:{int(target)}(skip)"
+    return size_factor, f"size:{int(target)}"
+
+
 def _parse_inputs(char_tags, lora_list, base_model):
     char_data = json.loads(char_tags).get("list", [])
     lora_data = json.loads(lora_list).get("list", [])
@@ -444,10 +475,15 @@ class SoyaCharLoraEyeDetailer_mdsoya:
                 # ── Store original crop for eyebrow restoration ──
                 original_crop_np = crop_tensor.cpu().numpy()
 
+                # ── Resolve effective upscale (per-face UPSCALE_SIZE override) ──
+                eff_upscale, upscale_info = _resolve_upscale_factor(
+                    lora_entry, upscale_factor, actual_w, actual_h
+                )
+
                 # ── Upscale for processing ──
-                if upscale_factor > 1.0:
-                    process_w = ((int(actual_w * upscale_factor) + 7) // 8) * 8
-                    process_h = ((int(actual_h * upscale_factor) + 7) // 8) * 8
+                if eff_upscale > 1.0:
+                    process_w = ((int(actual_w * eff_upscale) + 7) // 8) * 8
+                    process_h = ((int(actual_h * eff_upscale) + 7) // 8) * 8
 
                     crop_pil = Image.fromarray((crop_tensor.cpu().numpy() * 255).astype(np.uint8))
                     crop_pil = crop_pil.resize((process_w, process_h), Image.Resampling.LANCZOS)
@@ -524,7 +560,7 @@ class SoyaCharLoraEyeDetailer_mdsoya:
                     enhanced_crop = torch.from_numpy(enhanced_np.astype(np.float32))
 
                 # ── Downscale back to target size ──
-                if upscale_factor > 1.0 and (enhanced_crop.shape[1] != actual_h or enhanced_crop.shape[0] != actual_w):
+                if eff_upscale > 1.0 and (enhanced_crop.shape[1] != actual_h or enhanced_crop.shape[0] != actual_w):
                     enhanced_np = (enhanced_crop.cpu().numpy() * 255).astype(np.uint8)
                     enhanced_pil = Image.fromarray(enhanced_np)
                     enhanced_pil = enhanced_pil.resize((actual_w, actual_h), Image.Resampling.LANCZOS)
@@ -545,6 +581,7 @@ class SoyaCharLoraEyeDetailer_mdsoya:
                     f"  {name} | LoRA: {lora_info} | "
                     f"crop:({cx1},{cy1},{cx2},{cy2}) {actual_w}x{actual_h} | "
                     f"process: {process_w}x{process_h} | "
+                    f"upscale: {upscale_info}({eff_upscale:.3f}) | "
                     f"Prompt: {prompt}"
                 )
                 seed += 1
