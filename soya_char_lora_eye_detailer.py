@@ -72,6 +72,9 @@ def _resolve_upscale_factor(lora_entry, upscale_factor, actual_w, actual_h):
     UPSCALE_SIZE in the LoRA entry (e.g. "1024") sets the target size of the
     crop's longest side. Falls back to upscale_factor when missing/empty/invalid
     or when the crop already meets the target.
+
+    Returns (factor, summary) where summary is a short human-readable string
+    describing the actual decision.
     """
     raw = (lora_entry or {}).get("UPSCALE_SIZE", "")
     if isinstance(raw, (int, float)):
@@ -80,21 +83,21 @@ def _resolve_upscale_factor(lora_entry, upscale_factor, actual_w, actual_h):
         try:
             target = float(raw.strip())
         except ValueError:
-            return upscale_factor, "factor"
+            return upscale_factor, f"factor x{upscale_factor:.2f} (invalid UPSCALE_SIZE={raw!r})"
     else:
-        return upscale_factor, "factor"
+        return upscale_factor, f"factor x{upscale_factor:.2f} (no UPSCALE_SIZE)"
 
     if target <= 0:
-        return upscale_factor, "factor"
+        return upscale_factor, f"factor x{upscale_factor:.2f} (invalid UPSCALE_SIZE={target})"
 
     longest = float(max(actual_w, actual_h))
     if longest <= 0:
-        return upscale_factor, "factor"
+        return upscale_factor, f"factor x{upscale_factor:.2f} (degenerate crop)"
 
     size_factor = target / longest
     if size_factor <= 1.0:
-        return 1.0, f"size:{int(target)}(skip)"
-    return size_factor, f"size:{int(target)}"
+        return 1.0, f"target {int(target)}px SKIPPED (longest side {int(longest)}px already >= target)"
+    return size_factor, f"target {int(target)}px longest → x{size_factor:.3f} (from {int(longest)}px)"
 
 
 def _parse_inputs(char_tags, lora_list, base_model):
@@ -579,9 +582,8 @@ class SoyaCharLoraEyeDetailer_mdsoya:
 
                 log_lines.append(
                     f"  {name} | LoRA: {lora_info} | "
-                    f"crop:({cx1},{cy1},{cx2},{cy2}) {actual_w}x{actual_h} | "
-                    f"process: {process_w}x{process_h} | "
-                    f"upscale: {upscale_info}({eff_upscale:.3f}) | "
+                    f"crop:({cx1},{cy1},{cx2},{cy2}) {actual_w}x{actual_h} → process: {process_w}x{process_h} | "
+                    f"upscale: {upscale_info} | "
                     f"Prompt: {prompt}"
                 )
                 seed += 1
