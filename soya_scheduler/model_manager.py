@@ -9,7 +9,13 @@ import numpy as np
 
 
 def _resolve_model_path(folder_name, model_name):
-    """Resolve model path via folder_paths, falling back to models/<folder_name>/."""
+    """Resolve model path via folder_paths, falling back to models/<folder_name>/.
+
+    If model_name is an absolute path that exists, it is returned as-is — this lets
+    callers pass arbitrary filesystem paths instead of the scanned dropdown entries.
+    """
+    if os.path.isabs(model_name) and os.path.isfile(model_name):
+        return model_name
     import folder_paths
     path = folder_paths.get_full_path(folder_name, model_name)
     if path is not None:
