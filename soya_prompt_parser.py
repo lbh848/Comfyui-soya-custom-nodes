@@ -18,6 +18,8 @@ class SoyaPromptParser_mdsoya:
         "FACE_LORA_ACTIVATE": "STRING",
         "LORA_DATA": "STRING",
         "FACE_LORA_DATA": "STRING",
+        "STYLE_LORA_ACTIVATE": "STRING",
+        "STYLE_LORA_DATA": "STRING",
         "CHAR_FACE_TAG_INFORM": "STRING",
         "HRF_ACTIVATE": "STRING",
         "ANIMA_HRF_ACTIVATE": "STRING",
