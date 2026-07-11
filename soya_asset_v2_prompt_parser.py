@@ -18,6 +18,8 @@ class SoyaAssetV2PromptParser_mdsoya:
         "LORA_DATA": "STRING",
         "FACE_LORA_ACTIVATE": "STRING",
         "FACE_LORA_DATA": "STRING",
+        "STYLE_LORA_ACTIVATE": "STRING",
+        "STYLE_LORA_DATA": "STRING",
         "CHAR_FACE_TAG_INFORM": "STRING",
         "POSE_ACTIVATE": "STRING",
         "POSE_DATA": "STRING",
