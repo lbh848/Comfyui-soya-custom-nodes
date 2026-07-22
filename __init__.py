@@ -63,6 +63,7 @@ from .soya_apply_mask import SoyaApplyMask_mdsoya
 from .soya_char_lora_eye_detailer import SoyaCharLoraEyeDetailer_mdsoya
 from .soya_prompt_parser import SoyaPromptParser_mdsoya
 from .soya_asset_v2_prompt_parser import SoyaAssetV2PromptParser_mdsoya
+from .soya_first_sampler import SoyaFirstSampler_mdsoya
 
 # main-only nodes (for 배포예정_삽화_V3 + ray scheduler)
 from .soya_process_divider import SoyaProcessDivider_mdsoya
@@ -138,6 +139,7 @@ NODE_CLASS_MAPPINGS = {
     "SoyaCharLoraEyeDetailer_mdsoya": SoyaCharLoraEyeDetailer_mdsoya,
     "SoyaPromptParser_mdsoya": SoyaPromptParser_mdsoya,
     "SoyaAssetV2PromptParser_mdsoya": SoyaAssetV2PromptParser_mdsoya,
+    "SoyaFirstSampler_mdsoya": SoyaFirstSampler_mdsoya,
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": SoyaProcessDivider_mdsoya,
     "SoyaProcessCollector_mdsoya": SoyaProcessCollector_mdsoya,
@@ -214,6 +216,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaCharLoraEyeDetailer_mdsoya": "Char LoRA Eye Detailer (Soya)",
     "SoyaPromptParser_mdsoya": "Prompt Parser (Soya)",
     "SoyaAssetV2PromptParser_mdsoya": "Asset V2 Prompt Parser (Soya)",
+    "SoyaFirstSampler_mdsoya": "1st sampler",
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": "Soya Process Divider (Soya)",
     "SoyaProcessCollector_mdsoya": "Soya Process Collector (Soya)",

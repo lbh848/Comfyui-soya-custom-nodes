@@ -39,6 +39,8 @@ class SoyaPromptParser_mdsoya:
         "IMG_W": "INT",
         "IMG_H": "INT",
         "SEED": "INT",
+        # 기존 출력 인덱스를 보존하기 위해 새 필드는 항상 맨 뒤에 둔다.
+        "MULTI_CHAR": "STRING",
     }
 
     @classmethod
