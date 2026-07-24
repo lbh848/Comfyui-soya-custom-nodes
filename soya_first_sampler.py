@@ -18,9 +18,13 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
+from .anima_regional_conditioning import (
+    AnimaConditioningRegionChain,
+    ApplyAnimaRegionalConditioningPatch,
+)
+
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 _MAX_LORA_CACHE_ENTRIES = 8
-_MULTI_CHAR_REFINE_DENOISE = 0.5
 
 
 def _parse_enabled(value, field_name):
@@ -352,7 +356,8 @@ class SoyaFirstSampler_mdsoya:
     CATEGORY = "sampling"
     DESCRIPTION = (
         "ANIMA_MODEL_WO_CHAR와 LORA_DATA를 받아 캐릭터 LoRA를 내부 적용합니다. "
-        "MULTI_CHAR=true이면 clean model 구도 선행 뒤 RGB 마스크별 Hook LoRA로 보정하고, "
+        "MULTI_CHAR=true이면 캐릭터 LoRA를 한 번 병합하고 RGB 마스크별 프롬프트를 "
+        "Anima Regional Attention + Spectrum SPD/SPEED 단일 패스로 처리하며, "
         "false이면 LoRA를 전역 적용한 뒤 기존 Spectrum SPD/SPEED를 호출합니다."
     )
 
@@ -591,68 +596,33 @@ class SoyaFirstSampler_mdsoya:
             )
             masks = _load_channel_masks(mask_location, payload["char_num"])
 
-            composition_parts = (
-                payload["background_trigger_list"]
-                + payload["shared_before"]
-                + payload["shared_after"]
-            )
-            if payload["composition_prompt"] not in composition_parts:
-                composition_parts.append(payload["composition_prompt"])
-            composition_prompt = ", ".join(
-                part for part in composition_parts if part
-            )
-            if not composition_prompt:
-                raise ValueError("MULTI_CHAR 구도 선행 프롬프트가 비어 있습니다")
-            composition_conditioning = clip.encode_from_tokens_scheduled(
-                clip.tokenize(composition_prompt)
-            )
-            print(
-                f"[1st sampler] MULTI_CHAR 구도 선행 clean-model 샘플링: "
-                f"order={payload['char_name_list']}, "
-                f"composition_length={len(composition_prompt)}, denoise={denoise}"
-            )
-            composition_result = self._sample_stock_padded(
-                model,
-                seed,
-                steps,
-                cfg,
-                sampler_name,
-                scheduler,
-                composition_conditioning,
-                negative,
-                latent_image,
-                denoise,
-            )
-            composition_latent = composition_result[0]
-
-            hook_model, character_hooks, lora_counts = self._build_character_hooks(
-                model,
-                lora_entries,
-                payload["char_name_list"],
-            )
-
-            spatial_positive = []
-            spatial_negative = []
+            regional_model = self._apply_global_loras(model, lora_entries)
+            lora_counts = {
+                name: sum(
+                    1 for entry in lora_entries
+                    if entry["character"].casefold() == name.casefold()
+                )
+                for name in payload["char_name_list"]
+            }
+            regions = None
             region_prompts = []
             for index in range(payload["char_num"]):
                 prompt_parts = (
                     payload["char_trigger_list"][index]
                     + payload["shared_before"]
                     + [payload["char_inform"][index]]
+                    + [payload["composition_prompt"]]
                     + payload["shared_after"]
                 )
                 prompt = ", ".join(part for part in prompt_parts if part)
                 tokens = clip.tokenize(prompt)
                 conditioning = clip.encode_from_tokens_scheduled(tokens)
-                region_positive, region_negative = comfy.hooks.set_conds_props(
-                    conds=[conditioning, negative],
-                    strength=1.0,
-                    set_cond_area="mask bounds",
+                regions = AnimaConditioningRegionChain(
+                    previous=regions,
                     mask=masks[index],
-                    hooks=character_hooks[index],
+                    conditioning=conditioning,
+                    weight=1.0,
                 )
-                spatial_positive.extend(region_positive)
-                spatial_negative.extend(region_negative)
                 region_prompts.append(prompt)
 
             background_parts = (
@@ -660,6 +630,8 @@ class SoyaFirstSampler_mdsoya:
                 + payload["shared_before"]
                 + payload["shared_after"]
             )
+            if payload["composition_prompt"] not in background_parts:
+                background_parts.append(payload["composition_prompt"])
             if (
                 payload["background_prompt"]
                 and payload["background_prompt"] not in background_parts
@@ -673,30 +645,49 @@ class SoyaFirstSampler_mdsoya:
             background_conditioning = clip.encode_from_tokens_scheduled(
                 clip.tokenize(background_prompt)
             )
-            spatial_positive, spatial_negative = comfy.hooks.set_default_conds_and_combine(
-                conds=[spatial_positive, spatial_negative],
-                new_conds=[background_conditioning, negative],
+            regional_model = ApplyAnimaRegionalConditioningPatch().apply(
+                regional_model,
+                regions,
+                base_mode="uncovered_only",
+                base_strength=1.0,
+                end_percent=1.0,
+                cross_mask_strength=1.0,
+                self_mask_strength=0.0,
+                base_ratio=0.0,
+                cross_inject_every_n_blocks=1,
+                self_inject_every_n_blocks=1,
+                start_percent=0.0,
+                background_conditioning=background_conditioning,
+            )[0]
+            print(
+                f"[1st sampler] MULTI_CHAR Regional Attention 패치 적용: "
+                f"base_mode=uncovered_only, cross_mask_strength=1.0, "
+                f"self_mask_strength=0.0, base_ratio=0.0"
             )
             print(
-                f"[1st sampler] MULTI_CHAR=true · clean 구도 선행 + RGB mask Hook LoRA "
-                f"저 denoise 보정 실행: "
+                f"[1st sampler] MULTI_CHAR=true · 전역 캐릭터 LoRA + RGB Regional Attention "
+                f"+ Spectrum SPD/SPEED 단일 패스 실행: "
                 f"order={payload['char_name_list']}, loras={lora_counts}, "
                 f"prompt_lengths={[len(p) for p in region_prompts]}, "
                 f"background_length={len(background_prompt)}, "
-                f"refine_denoise={min(float(denoise), _MULTI_CHAR_REFINE_DENOISE)}, "
+                f"steps={steps}, denoise={denoise}, "
                 f"mask_fingerprint={payload['mask_fingerprint'][:12]}"
             )
-            result = self._sample_stock_padded(
-                hook_model,
+            result = self._sample_spectrum(
+                regional_model,
                 seed,
                 steps,
                 cfg,
                 sampler_name,
                 scheduler,
-                spatial_positive,
-                spatial_negative,
-                composition_latent,
-                min(float(denoise), _MULTI_CHAR_REFINE_DENOISE),
+                background_conditioning,
+                negative,
+                latent_image,
+                denoise,
+                split_mode,
+                spd_scale,
+                spd_sigma,
+                adaptive_smc_alpha,
             )
             # 후단 HRF/디테일러에는 전역 all-character LoRA 모델이 아니라
             # 원래 clean model을 넘겨 첫 패스의 영역 분리를 재오염하지 않는다.
