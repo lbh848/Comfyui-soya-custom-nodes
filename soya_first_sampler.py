@@ -20,6 +20,7 @@ from PIL import Image
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 _MAX_LORA_CACHE_ENTRIES = 8
+_MULTI_CHAR_REFINE_DENOISE = 0.5
 
 
 def _parse_enabled(value, field_name):
@@ -210,6 +211,12 @@ def _parse_multi_char(value):
         background_prompt = ""
     if not isinstance(background_prompt, str):
         raise ValueError("MULTI_CHAR.background_prompt는 문자열이어야 합니다")
+    composition_prompt = payload.get("composition_prompt", "")
+    if not isinstance(composition_prompt, str):
+        raise ValueError("MULTI_CHAR.composition_prompt는 문자열이어야 합니다")
+    composition_prompt = composition_prompt.strip()
+    if not composition_prompt:
+        raise ValueError("MULTI_CHAR.composition_prompt가 비어 있습니다")
     mask_fingerprint = str(payload.get("mask_fingerprint") or "").strip().casefold()
     if len(mask_fingerprint) != 64 or any(
         character not in "0123456789abcdef" for character in mask_fingerprint
@@ -228,6 +235,7 @@ def _parse_multi_char(value):
         "shared_before": _as_prompt_parts(shared.get("before_char", []), "shared_tag.before_char"),
         "shared_after": _as_prompt_parts(shared.get("after_char", []), "shared_tag.after_char"),
         "background_prompt": background_prompt.strip(),
+        "composition_prompt": composition_prompt,
         "mask_fingerprint": mask_fingerprint,
     }
 
@@ -344,7 +352,7 @@ class SoyaFirstSampler_mdsoya:
     CATEGORY = "sampling"
     DESCRIPTION = (
         "ANIMA_MODEL_WO_CHAR와 LORA_DATA를 받아 캐릭터 LoRA를 내부 적용합니다. "
-        "MULTI_CHAR=true이면 RGB 마스크별 Hook LoRA + stock KSampler를 사용하고, "
+        "MULTI_CHAR=true이면 clean model 구도 선행 뒤 RGB 마스크별 Hook LoRA로 보정하고, "
         "false이면 LoRA를 전역 적용한 뒤 기존 Spectrum SPD/SPEED를 호출합니다."
     )
 
@@ -582,6 +590,41 @@ class SoyaFirstSampler_mdsoya:
                 payload["char_name_list"],
             )
             masks = _load_channel_masks(mask_location, payload["char_num"])
+
+            composition_parts = (
+                payload["background_trigger_list"]
+                + payload["shared_before"]
+                + payload["shared_after"]
+            )
+            if payload["composition_prompt"] not in composition_parts:
+                composition_parts.append(payload["composition_prompt"])
+            composition_prompt = ", ".join(
+                part for part in composition_parts if part
+            )
+            if not composition_prompt:
+                raise ValueError("MULTI_CHAR 구도 선행 프롬프트가 비어 있습니다")
+            composition_conditioning = clip.encode_from_tokens_scheduled(
+                clip.tokenize(composition_prompt)
+            )
+            print(
+                f"[1st sampler] MULTI_CHAR 구도 선행 clean-model 샘플링: "
+                f"order={payload['char_name_list']}, "
+                f"composition_length={len(composition_prompt)}, denoise={denoise}"
+            )
+            composition_result = self._sample_stock_padded(
+                model,
+                seed,
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                composition_conditioning,
+                negative,
+                latent_image,
+                denoise,
+            )
+            composition_latent = composition_result[0]
+
             hook_model, character_hooks, lora_counts = self._build_character_hooks(
                 model,
                 lora_entries,
@@ -604,7 +647,7 @@ class SoyaFirstSampler_mdsoya:
                 region_positive, region_negative = comfy.hooks.set_conds_props(
                     conds=[conditioning, negative],
                     strength=1.0,
-                    set_cond_area="default",
+                    set_cond_area="mask bounds",
                     mask=masks[index],
                     hooks=character_hooks[index],
                 )
@@ -635,10 +678,12 @@ class SoyaFirstSampler_mdsoya:
                 new_conds=[background_conditioning, negative],
             )
             print(
-                f"[1st sampler] MULTI_CHAR=true · RGB mask + Hook LoRA + stock KSampler 실행: "
+                f"[1st sampler] MULTI_CHAR=true · clean 구도 선행 + RGB mask Hook LoRA "
+                f"저 denoise 보정 실행: "
                 f"order={payload['char_name_list']}, loras={lora_counts}, "
                 f"prompt_lengths={[len(p) for p in region_prompts]}, "
                 f"background_length={len(background_prompt)}, "
+                f"refine_denoise={min(float(denoise), _MULTI_CHAR_REFINE_DENOISE)}, "
                 f"mask_fingerprint={payload['mask_fingerprint'][:12]}"
             )
             result = self._sample_stock_padded(
@@ -650,8 +695,8 @@ class SoyaFirstSampler_mdsoya:
                 scheduler,
                 spatial_positive,
                 spatial_negative,
-                latent_image,
-                denoise,
+                composition_latent,
+                min(float(denoise), _MULTI_CHAR_REFINE_DENOISE),
             )
             # 후단 HRF/디테일러에는 전역 all-character LoRA 모델이 아니라
             # 원래 clean model을 넘겨 첫 패스의 영역 분리를 재오염하지 않는다.
