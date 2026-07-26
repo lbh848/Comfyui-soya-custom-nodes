@@ -1,4 +1,4 @@
-"""Spectrum SPEED sampler with optional Anima regional conditioning."""
+"""Selectable stock/FAST sampler with optional Anima regional conditioning."""
 
 from __future__ import annotations
 
@@ -25,6 +25,9 @@ from .anima_regional_conditioning import (
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 _MAX_LORA_CACHE_ENTRIES = 8
+_SAMPLER_MODE_KSAMPLER = "KSampler"
+_SAMPLER_MODE_FAST = "FAST"
+_SAMPLER_MODES = [_SAMPLER_MODE_KSAMPLER, _SAMPLER_MODE_FAST]
 
 
 def _parse_enabled(value, field_name):
@@ -347,6 +350,18 @@ class SoyaFirstSampler_mdsoya:
                     "FLOAT",
                     {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.05, "round": 0.001},
                 ),
+            },
+            "optional": {
+                "sampler_mode": (
+                    _SAMPLER_MODES,
+                    {
+                        "default": _SAMPLER_MODE_FAST,
+                        "tooltip": (
+                            "KSampler = 원본 ComfyUI KSampler, "
+                            "FAST = Spectrum SPD/SPEED 가속 sampler"
+                        ),
+                    },
+                ),
             }
         }
 
@@ -357,8 +372,8 @@ class SoyaFirstSampler_mdsoya:
     DESCRIPTION = (
         "ANIMA_MODEL_WO_CHAR와 LORA_DATA를 받아 캐릭터 LoRA를 내부 적용합니다. "
         "MULTI_CHAR=true이면 캐릭터 LoRA를 한 번 병합하고 RGB 마스크별 프롬프트를 "
-        "Anima Regional Attention + Spectrum SPD/SPEED 단일 패스로 처리하며, "
-        "false이면 LoRA를 전역 적용한 뒤 기존 Spectrum SPD/SPEED를 호출합니다."
+        "Anima Regional Attention 단일 패스로 처리합니다. sampler_mode에서 원본 "
+        "ComfyUI KSampler 또는 Spectrum SPD/SPEED FAST sampler를 선택할 수 있습니다."
     )
 
     def _load_lora(self, entry):
@@ -551,6 +566,59 @@ class SoyaFirstSampler_mdsoya:
             adaptive_smc_alpha=adaptive_smc_alpha,
         )
 
+    def _sample_selected(
+        self,
+        sampler_mode,
+        model,
+        seed,
+        steps,
+        cfg,
+        sampler_name,
+        scheduler,
+        positive,
+        negative,
+        latent_image,
+        denoise,
+        split_mode,
+        spd_scale,
+        spd_sigma,
+        adaptive_smc_alpha,
+    ):
+        if sampler_mode == _SAMPLER_MODE_KSAMPLER:
+            return self._sample_stock_padded(
+                model,
+                seed,
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                positive,
+                negative,
+                latent_image,
+                denoise,
+            )
+        if sampler_mode == _SAMPLER_MODE_FAST:
+            return self._sample_spectrum(
+                model,
+                seed,
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                positive,
+                negative,
+                latent_image,
+                denoise,
+                split_mode,
+                spd_scale,
+                spd_sigma,
+                adaptive_smc_alpha,
+            )
+        raise ValueError(
+            f"지원하지 않는 sampler_mode입니다: {sampler_mode!r} "
+            f"(지원값: {', '.join(_SAMPLER_MODES)})"
+        )
+
     def sample(
         self,
         model,
@@ -572,6 +640,7 @@ class SoyaFirstSampler_mdsoya:
         spd_scale,
         spd_sigma,
         adaptive_smc_alpha,
+        sampler_mode=_SAMPLER_MODE_FAST,
     ):
         try:
             payload = _parse_multi_char(multi_char)
@@ -580,12 +649,24 @@ class SoyaFirstSampler_mdsoya:
                 global_model = self._apply_global_loras(model, lora_entries)
                 print(
                     "[1st sampler] MULTI_CHAR=false · 캐릭터 LoRA 전역 적용 후 "
-                    f"Spectrum SPD/SPEED 실행: loras={len(lora_entries)}"
+                    f"{sampler_mode} 실행: loras={len(lora_entries)}"
                 )
-                result = self._sample_spectrum(
-                    global_model, seed, steps, cfg, sampler_name, scheduler,
-                    positive, negative, latent_image, denoise, split_mode,
-                    spd_scale, spd_sigma, adaptive_smc_alpha,
+                result = self._sample_selected(
+                    sampler_mode,
+                    global_model,
+                    seed,
+                    steps,
+                    cfg,
+                    sampler_name,
+                    scheduler,
+                    positive,
+                    negative,
+                    latent_image,
+                    denoise,
+                    split_mode,
+                    spd_scale,
+                    spd_sigma,
+                    adaptive_smc_alpha,
                 )
                 return result[0], global_model
 
@@ -666,14 +747,15 @@ class SoyaFirstSampler_mdsoya:
             )
             print(
                 f"[1st sampler] MULTI_CHAR=true · 전역 캐릭터 LoRA + RGB Regional Attention "
-                f"+ Spectrum SPD/SPEED 단일 패스 실행: "
+                f"+ {sampler_mode} 단일 패스 실행: "
                 f"order={payload['char_name_list']}, loras={lora_counts}, "
                 f"prompt_lengths={[len(p) for p in region_prompts]}, "
                 f"background_length={len(background_prompt)}, "
                 f"steps={steps}, denoise={denoise}, "
                 f"mask_fingerprint={payload['mask_fingerprint'][:12]}"
             )
-            result = self._sample_spectrum(
+            result = self._sample_selected(
+                sampler_mode,
                 regional_model,
                 seed,
                 steps,
@@ -695,6 +777,7 @@ class SoyaFirstSampler_mdsoya:
         except Exception as exc:
             print(
                 f"[1st sampler] 샘플링 실패: mask_location={mask_location!r}, "
+                f"sampler_mode={sampler_mode!r}, "
                 f"multi_char_len={len(str(multi_char or ''))}, "
                 f"lora_data_len={len(str(LORA_DATA or ''))}, error={exc}"
             )
