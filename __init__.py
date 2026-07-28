@@ -66,6 +66,7 @@ from .soya_prompt_parser import SoyaPromptParser_mdsoya
 from .soya_asset_v2_prompt_parser import SoyaAssetV2PromptParser_mdsoya
 from .soya_qwen_edit_prompt_parser import SoyaQwenEditPromptParser_mdsoya
 from .soya_qwen_edit_conditioning import SoyaQwenEditConditioning_mdsoya
+from .soya_anima_lllite import SoyaAnimaLLLiteApply_mdsoya
 from .soya_first_sampler import SoyaFirstSampler_mdsoya
 
 # main-only nodes (for 배포예정_삽화_V3 + ray scheduler)
@@ -145,6 +146,7 @@ NODE_CLASS_MAPPINGS = {
     "SoyaAssetV2PromptParser_mdsoya": SoyaAssetV2PromptParser_mdsoya,
     "SoyaQwenEditPromptParser_mdsoya": SoyaQwenEditPromptParser_mdsoya,
     "SoyaQwenEditConditioning_mdsoya": SoyaQwenEditConditioning_mdsoya,
+    "SoyaAnimaLLLiteApply_mdsoya": SoyaAnimaLLLiteApply_mdsoya,
     "SoyaFirstSampler_mdsoya": SoyaFirstSampler_mdsoya,
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": SoyaProcessDivider_mdsoya,
@@ -225,6 +227,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaAssetV2PromptParser_mdsoya": "Asset V2 Prompt Parser (Soya)",
     "SoyaQwenEditPromptParser_mdsoya": "Qwen Edit Prompt Parser (Soya)",
     "SoyaQwenEditConditioning_mdsoya": "Qwen Edit Conditioning v2 (Soya)",
+    "SoyaAnimaLLLiteApply_mdsoya": "Anima LLLite Inpainting Apply (Soya)",
     "SoyaFirstSampler_mdsoya": "1st sampler",
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": "Soya Process Divider (Soya)",
