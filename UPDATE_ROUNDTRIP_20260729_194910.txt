@@ -1,0 +1,4 @@
+Comfy manager updater round-trip marker
+test_id: 20260729-194910
+repository: Comfyui-soya-custom-nodes
+target_branch: main
