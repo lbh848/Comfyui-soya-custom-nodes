@@ -67,6 +67,7 @@ class FirstSamplerTests(unittest.TestCase):
             "simple",
             "positive",
             "negative",
+            "clip",
             "latent",
             1.0,
             "single",
@@ -81,7 +82,7 @@ class FirstSamplerTests(unittest.TestCase):
         self.assertNotIn("sampler_mode", input_types["required"])
         self.assertEqual(
             input_types["optional"]["sampler_mode"][0],
-            ["KSampler", "FAST"],
+            ["KSampler", "FAST", "SpectrumKSamplerModGuidance"],
         )
         self.assertEqual(
             input_types["optional"]["sampler_mode"][1]["default"],
@@ -98,12 +99,14 @@ class FirstSamplerTests(unittest.TestCase):
                 return_value=("stock",),
             ) as stock,
             mock.patch.object(node, "_sample_spectrum") as fast,
+            mock.patch.object(node, "_sample_spectrum_mod_guidance") as mod_guidance,
         ):
             result = self._dispatch(node, "KSampler")
 
         self.assertEqual(result, ("stock",))
         stock.assert_called_once()
         fast.assert_not_called()
+        mod_guidance.assert_not_called()
 
     def test_fast_mode_dispatches_to_spectrum_sampler(self):
         node = FirstSampler()
@@ -115,12 +118,115 @@ class FirstSamplerTests(unittest.TestCase):
                 "_sample_spectrum",
                 return_value=("fast",),
             ) as fast,
+            mock.patch.object(node, "_sample_spectrum_mod_guidance") as mod_guidance,
         ):
             result = self._dispatch(node, "FAST")
 
         self.assertEqual(result, ("fast",))
         stock.assert_not_called()
         fast.assert_called_once()
+        mod_guidance.assert_not_called()
+
+    def test_mod_guidance_mode_dispatches_to_embedded_implementation(self):
+        node = FirstSampler()
+
+        with (
+            mock.patch.object(node, "_sample_stock_padded") as stock,
+            mock.patch.object(node, "_sample_spectrum") as fast,
+            mock.patch.object(
+                node,
+                "_sample_spectrum_mod_guidance",
+                return_value=("mod-guidance",),
+            ) as mod_guidance,
+        ):
+            result = self._dispatch(node, "SpectrumKSamplerModGuidance")
+
+        self.assertEqual(result, ("mod-guidance",))
+        stock.assert_not_called()
+        fast.assert_not_called()
+        mod_guidance.assert_called_once_with(
+            "model",
+            "clip",
+            1,
+            28,
+            4.0,
+            "euler",
+            "simple",
+            "positive",
+            "negative",
+            "latent",
+            1.0,
+        )
+
+    def test_embedded_mod_guidance_uses_fixed_personal_profile(self):
+        node = FirstSampler()
+        model = mock.Mock()
+        mod_model = mock.sentinel.mod_model
+        model.clone.return_value = mod_model
+        setup_mod_guidance = mock.Mock()
+        spectrum_sample = mock.Mock(return_value=("sampled",))
+
+        with mock.patch.object(
+            MODULE,
+            "_spectrum_mod_guidance_runtime",
+            return_value=(setup_mod_guidance, spectrum_sample),
+        ):
+            result = node._sample_spectrum_mod_guidance(
+                model,
+                "clip",
+                1,
+                28,
+                4.0,
+                "euler",
+                "simple",
+                "positive",
+                "negative",
+                "latent",
+                1.0,
+            )
+
+        self.assertEqual(result, ("sampled",))
+        setup_mod_guidance.assert_called_once_with(
+            mod_model,
+            "clip",
+            "positive",
+            "negative",
+            None,
+            "masterpiece, best quality, highres, absurdres, very aesthetic",
+            3.0,
+            quality_neg=(
+                "score_1, score_2, score_3, worst quality, lowres, old, "
+                "bad hands, bad anatomy"
+            ),
+            start_layer=8,
+            end_layer=27,
+            taper=0,
+            taper_scale=0.25,
+            final_w=0.0,
+        )
+        spectrum_sample.assert_called_once_with(
+            mod_model,
+            1,
+            28,
+            4.0,
+            "euler",
+            "simple",
+            "positive",
+            "negative",
+            "latent",
+            1.0,
+            window_size=2.0,
+            flex_window=0.25,
+            warmup_steps=6,
+            blend_w=0.3,
+            cheby_degree=3,
+            ridge_lambda=0.1,
+            dcw_mode="off",
+            smc_cfg_alpha=0.10,
+            smc_cfg_lambda=5.0,
+            schedule="window",
+            refresh_ratio=-1.0,
+        )
 
     def test_unknown_sampler_mode_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "지원하지 않는 sampler_mode"):

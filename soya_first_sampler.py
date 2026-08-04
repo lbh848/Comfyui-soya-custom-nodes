@@ -1,4 +1,4 @@
-"""Selectable stock/FAST sampler with optional Anima regional conditioning."""
+"""Selectable stock/Spectrum samplers with optional Anima regional conditioning."""
 
 from __future__ import annotations
 
@@ -27,7 +27,60 @@ _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 _MAX_LORA_CACHE_ENTRIES = 8
 _SAMPLER_MODE_KSAMPLER = "KSampler"
 _SAMPLER_MODE_FAST = "FAST"
-_SAMPLER_MODES = [_SAMPLER_MODE_KSAMPLER, _SAMPLER_MODE_FAST]
+_SAMPLER_MODE_SPECTRUM_MOD_GUIDANCE = "SpectrumKSamplerModGuidance"
+_SAMPLER_MODES = [
+    _SAMPLER_MODE_KSAMPLER,
+    _SAMPLER_MODE_FAST,
+    _SAMPLER_MODE_SPECTRUM_MOD_GUIDANCE,
+]
+
+_MOD_GUIDANCE_QUALITY_TAGS = (
+    "masterpiece, best quality, highres, absurdres, very aesthetic"
+)
+_MOD_GUIDANCE_QUALITY_NEG = (
+    "score_1, score_2, score_3, worst quality, lowres, old, bad hands, bad anatomy"
+)
+_MOD_GUIDANCE_PROFILE = "step_i8_skip27"
+_MOD_GUIDANCE_WEIGHT = 3.0
+_MOD_GUIDANCE_START_LAYER = 8
+_MOD_GUIDANCE_END_LAYER = 27
+_MOD_GUIDANCE_ADAPTIVE_SMC_ALPHA = 0.10
+_MOD_GUIDANCE_REFRESH_RATIO = -1.0
+_SPECTRUM_DEFAULTS = {
+    "window_size": 2.0,
+    "flex_window": 0.25,
+    "warmup_steps": 6,
+    "blend_w": 0.3,
+    "cheby_degree": 3,
+    "ridge_lambda": 0.1,
+}
+
+
+def _spectrum_mod_guidance_runtime():
+    """Return Spectrum's loaded low-level functions without invoking its node class."""
+    import nodes as comfy_nodes
+
+    sampler_class = comfy_nodes.NODE_CLASS_MAPPINGS.get("SpectrumKSampler")
+    if sampler_class is None:
+        message = (
+            "Spectrum 저수준 런타임을 찾지 못했습니다. "
+            "comfyui-spectrum-ksampler가 설치·로드되었는지 확인하세요."
+        )
+        print(f"[1st sampler] {message}")
+        raise RuntimeError(message)
+
+    namespace = getattr(getattr(sampler_class, "sample", None), "__globals__", {})
+    setup_mod_guidance = namespace.get("setup_mod_guidance")
+    spectrum_sample = namespace.get("spectrum_sample")
+    if not callable(setup_mod_guidance) or not callable(spectrum_sample):
+        message = (
+            "Spectrum 저수준 함수가 없습니다: "
+            f"setup_mod_guidance={callable(setup_mod_guidance)}, "
+            f"spectrum_sample={callable(spectrum_sample)}"
+        )
+        print(f"[1st sampler] {message}")
+        raise RuntimeError(message)
+    return setup_mod_guidance, spectrum_sample
 
 
 def _parse_enabled(value, field_name):
@@ -358,7 +411,9 @@ class SoyaFirstSampler_mdsoya:
                         "default": _SAMPLER_MODE_FAST,
                         "tooltip": (
                             "KSampler = 원본 ComfyUI KSampler, "
-                            "FAST = Spectrum SPD/SPEED 가속 sampler"
+                            "FAST = Spectrum SPD/SPEED 가속 sampler, "
+                            "SpectrumKSamplerModGuidance = 개인용 고정 Mod Guidance + "
+                            "legacy window Spectrum sampler"
                         ),
                     },
                 ),
@@ -373,7 +428,8 @@ class SoyaFirstSampler_mdsoya:
         "ANIMA_MODEL_WO_CHAR와 LORA_DATA를 받아 캐릭터 LoRA를 내부 적용합니다. "
         "MULTI_CHAR=true이면 캐릭터 LoRA를 한 번 병합하고 RGB 마스크별 프롬프트를 "
         "Anima Regional Attention 단일 패스로 처리합니다. sampler_mode에서 원본 "
-        "ComfyUI KSampler 또는 Spectrum SPD/SPEED FAST sampler를 선택할 수 있습니다."
+        "ComfyUI KSampler, Spectrum SPD/SPEED FAST sampler 또는 고정 프로필 "
+        "Spectrum Mod Guidance sampler를 선택할 수 있습니다."
     )
 
     def _load_lora(self, entry):
@@ -566,6 +622,67 @@ class SoyaFirstSampler_mdsoya:
             adaptive_smc_alpha=adaptive_smc_alpha,
         )
 
+    @staticmethod
+    def _sample_spectrum_mod_guidance(
+        model,
+        clip,
+        seed,
+        steps,
+        cfg,
+        sampler_name,
+        scheduler,
+        positive,
+        negative,
+        latent_image,
+        denoise,
+    ):
+        if clip is None:
+            message = "SpectrumKSamplerModGuidance 실행에 CLIP 입력이 필요합니다"
+            print(f"[1st sampler] {message}")
+            raise ValueError(message)
+
+        setup_mod_guidance, spectrum_sample = _spectrum_mod_guidance_runtime()
+        mod_model = model.clone()
+        setup_mod_guidance(
+            mod_model,
+            clip,
+            positive,
+            negative,
+            None,
+            _MOD_GUIDANCE_QUALITY_TAGS,
+            _MOD_GUIDANCE_WEIGHT,
+            quality_neg=_MOD_GUIDANCE_QUALITY_NEG,
+            start_layer=_MOD_GUIDANCE_START_LAYER,
+            end_layer=_MOD_GUIDANCE_END_LAYER,
+            taper=0,
+            taper_scale=0.25,
+            final_w=0.0,
+        )
+        print(
+            "[1st sampler] SpectrumKSamplerModGuidance 고정 프로필 적용: "
+            f"profile={_MOD_GUIDANCE_PROFILE}, "
+            f"adaptive_smc_alpha={_MOD_GUIDANCE_ADAPTIVE_SMC_ALPHA:.2f}, "
+            f"refresh_ratio={_MOD_GUIDANCE_REFRESH_RATIO:.1f}"
+        )
+        return spectrum_sample(
+            mod_model,
+            seed,
+            steps,
+            cfg,
+            sampler_name,
+            scheduler,
+            positive,
+            negative,
+            latent_image,
+            denoise,
+            **_SPECTRUM_DEFAULTS,
+            dcw_mode="off",
+            smc_cfg_alpha=_MOD_GUIDANCE_ADAPTIVE_SMC_ALPHA,
+            smc_cfg_lambda=5.0,
+            schedule="window",
+            refresh_ratio=_MOD_GUIDANCE_REFRESH_RATIO,
+        )
+
     def _sample_selected(
         self,
         sampler_mode,
@@ -577,6 +694,7 @@ class SoyaFirstSampler_mdsoya:
         scheduler,
         positive,
         negative,
+        clip,
         latent_image,
         denoise,
         split_mode,
@@ -613,6 +731,20 @@ class SoyaFirstSampler_mdsoya:
                 spd_scale,
                 spd_sigma,
                 adaptive_smc_alpha,
+            )
+        if sampler_mode == _SAMPLER_MODE_SPECTRUM_MOD_GUIDANCE:
+            return self._sample_spectrum_mod_guidance(
+                model,
+                clip,
+                seed,
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                positive,
+                negative,
+                latent_image,
+                denoise,
             )
         raise ValueError(
             f"지원하지 않는 sampler_mode입니다: {sampler_mode!r} "
@@ -661,6 +793,7 @@ class SoyaFirstSampler_mdsoya:
                     scheduler,
                     positive,
                     negative,
+                    clip,
                     latent_image,
                     denoise,
                     split_mode,
@@ -764,6 +897,7 @@ class SoyaFirstSampler_mdsoya:
                 scheduler,
                 background_conditioning,
                 negative,
+                clip,
                 latent_image,
                 denoise,
                 split_mode,

@@ -4,3 +4,4 @@ __pycache__/
 CLAUDE.md
 .civitai_api_key
 soya_scheduler/node_info.json
+models/
