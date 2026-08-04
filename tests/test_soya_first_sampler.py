@@ -53,10 +53,11 @@ def _load_module():
 
 MODULE = _load_module()
 FirstSampler = MODULE.SoyaFirstSampler_mdsoya
+SpectrumOptions = MODULE.SoyaSpectrumModGuidanceOptions_mdsoya
 
 
 class FirstSamplerTests(unittest.TestCase):
-    def _dispatch(self, node, sampler_mode):
+    def _dispatch(self, node, sampler_mode, spectrum_options=None):
         return node._sample_selected(
             sampler_mode,
             "model",
@@ -74,6 +75,7 @@ class FirstSamplerTests(unittest.TestCase):
             0.5,
             0.7,
             0.1,
+            spectrum_options,
         )
 
     def test_sampler_mode_is_optional_and_defaults_to_fast(self):
@@ -88,6 +90,52 @@ class FirstSamplerTests(unittest.TestCase):
             input_types["optional"]["sampler_mode"][1]["default"],
             "FAST",
         )
+        self.assertEqual(
+            input_types["optional"]["spectrum_options"][0],
+            "SOYA_SPECTRUM_MOD_GUIDANCE_OPTIONS",
+        )
+
+    def test_spectrum_options_node_exposes_current_defaults(self):
+        input_types = SpectrumOptions.INPUT_TYPES()["required"]
+
+        self.assertEqual(
+            input_types["positive"][1]["default"],
+            "masterpiece, best quality, highres, absurdres, very aesthetic",
+        )
+        self.assertEqual(
+            input_types["negative"][1]["default"],
+            (
+                "score_1, score_2, score_3, worst quality, lowres, old, "
+                "bad hands, bad anatomy"
+            ),
+        )
+        self.assertEqual(
+            input_types["mod_w_profile"][0],
+            ["off", "step_i8_skip27", "step_i14", "uniform_w3"],
+        )
+        self.assertEqual(input_types["refresh_ratio"][1]["default"], -1.0)
+        self.assertEqual(input_types["adaptive_smc_alpha"][1]["default"], 0.1)
+        self.assertEqual(
+            SpectrumOptions.RETURN_TYPES,
+            ("SOYA_SPECTRUM_MOD_GUIDANCE_OPTIONS",),
+        )
+
+    def test_spectrum_options_node_builds_typed_bundle(self):
+        result = SpectrumOptions().build(
+            "quality positive",
+            "quality negative",
+            "step_i14",
+            0.25,
+            0.3,
+        )
+
+        self.assertEqual(result, ({
+            "positive": "quality positive",
+            "negative": "quality negative",
+            "mod_w_profile": "step_i14",
+            "refresh_ratio": 0.25,
+            "adaptive_smc_alpha": 0.3,
+        },))
 
     def test_ksampler_mode_dispatches_to_stock_sampler(self):
         node = FirstSampler()
@@ -156,6 +204,7 @@ class FirstSamplerTests(unittest.TestCase):
             "negative",
             "latent",
             1.0,
+            None,
         )
 
     def test_embedded_mod_guidance_uses_fixed_personal_profile(self):
@@ -227,6 +276,101 @@ class FirstSamplerTests(unittest.TestCase):
             schedule="window",
             refresh_ratio=-1.0,
         )
+
+    def test_embedded_mod_guidance_uses_connected_options_and_sea_schedule(self):
+        node = FirstSampler()
+        model = mock.Mock()
+        mod_model = mock.sentinel.mod_model
+        model.clone.return_value = mod_model
+        setup_mod_guidance = mock.Mock()
+        spectrum_sample = mock.Mock(return_value=("sampled",))
+        options = {
+            "positive": "quality positive",
+            "negative": "quality negative",
+            "mod_w_profile": "step_i14",
+            "refresh_ratio": 0.25,
+            "adaptive_smc_alpha": 0.3,
+        }
+
+        with mock.patch.object(
+            MODULE,
+            "_spectrum_mod_guidance_runtime",
+            return_value=(setup_mod_guidance, spectrum_sample),
+        ):
+            result = node._sample_spectrum_mod_guidance(
+                model,
+                "clip",
+                1,
+                28,
+                4.0,
+                "euler",
+                "simple",
+                "positive",
+                "negative",
+                "latent",
+                1.0,
+                options,
+            )
+
+        self.assertEqual(result, ("sampled",))
+        setup_mod_guidance.assert_called_once_with(
+            mod_model,
+            "clip",
+            "positive",
+            "negative",
+            None,
+            "quality positive",
+            3.0,
+            quality_neg="quality negative",
+            start_layer=14,
+            end_layer=-1,
+            taper=0,
+            taper_scale=0.25,
+            final_w=0.0,
+        )
+        self.assertEqual(spectrum_sample.call_args.kwargs["schedule"], "sea")
+        self.assertEqual(spectrum_sample.call_args.kwargs["refresh_ratio"], 0.25)
+        self.assertEqual(spectrum_sample.call_args.kwargs["smc_cfg_alpha"], 0.3)
+
+    def test_mod_profile_off_skips_guidance_but_still_samples(self):
+        node = FirstSampler()
+        model = mock.Mock()
+        setup_mod_guidance = mock.Mock()
+        spectrum_sample = mock.Mock(return_value=("sampled",))
+        options = {
+            "positive": "",
+            "negative": "",
+            "mod_w_profile": "off",
+            "refresh_ratio": -0.5,
+            "adaptive_smc_alpha": 0.0,
+        }
+
+        with mock.patch.object(
+            MODULE,
+            "_spectrum_mod_guidance_runtime",
+            return_value=(setup_mod_guidance, spectrum_sample),
+        ):
+            result = node._sample_spectrum_mod_guidance(
+                model,
+                None,
+                1,
+                28,
+                4.0,
+                "euler",
+                "simple",
+                "positive",
+                "negative",
+                "latent",
+                1.0,
+                options,
+            )
+
+        self.assertEqual(result, ("sampled",))
+        model.clone.assert_not_called()
+        setup_mod_guidance.assert_not_called()
+        self.assertIs(spectrum_sample.call_args.args[0], model)
+        self.assertEqual(spectrum_sample.call_args.kwargs["schedule"], "window")
+        self.assertEqual(spectrum_sample.call_args.kwargs["refresh_ratio"], -1.0)
 
     def test_unknown_sampler_mode_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "지원하지 않는 sampler_mode"):

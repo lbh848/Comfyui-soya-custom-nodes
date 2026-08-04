@@ -34,6 +34,8 @@ _SAMPLER_MODES = [
     _SAMPLER_MODE_SPECTRUM_MOD_GUIDANCE,
 ]
 
+_SPECTRUM_MOD_OPTIONS_TYPE = "SOYA_SPECTRUM_MOD_GUIDANCE_OPTIONS"
+
 _MOD_GUIDANCE_QUALITY_TAGS = (
     "masterpiece, best quality, highres, absurdres, very aesthetic"
 )
@@ -41,11 +43,39 @@ _MOD_GUIDANCE_QUALITY_NEG = (
     "score_1, score_2, score_3, worst quality, lowres, old, bad hands, bad anatomy"
 )
 _MOD_GUIDANCE_PROFILE = "step_i8_skip27"
-_MOD_GUIDANCE_WEIGHT = 3.0
-_MOD_GUIDANCE_START_LAYER = 8
-_MOD_GUIDANCE_END_LAYER = 27
 _MOD_GUIDANCE_ADAPTIVE_SMC_ALPHA = 0.10
 _MOD_GUIDANCE_REFRESH_RATIO = -1.0
+_MOD_GUIDANCE_PROFILE_OFF = "off"
+_MOD_GUIDANCE_PROFILES = {
+    "step_i8_skip27": {
+        "w": 3.0,
+        "start_layer": 8,
+        "end_layer": 27,
+        "taper": 0,
+        "taper_scale": 0.25,
+        "final_w": 0.0,
+    },
+    "step_i14": {
+        "w": 3.0,
+        "start_layer": 14,
+        "end_layer": -1,
+        "taper": 0,
+        "taper_scale": 0.25,
+        "final_w": 0.0,
+    },
+    "uniform_w3": {
+        "w": 3.0,
+        "start_layer": 0,
+        "end_layer": -1,
+        "taper": 0,
+        "taper_scale": 0.25,
+        "final_w": 0.0,
+    },
+}
+_MOD_GUIDANCE_PROFILE_CHOICES = [
+    _MOD_GUIDANCE_PROFILE_OFF,
+    *_MOD_GUIDANCE_PROFILES.keys(),
+]
 _SPECTRUM_DEFAULTS = {
     "window_size": 2.0,
     "flex_window": 0.25,
@@ -54,6 +84,170 @@ _SPECTRUM_DEFAULTS = {
     "cheby_degree": 3,
     "ridge_lambda": 0.1,
 }
+
+
+def _default_spectrum_mod_options():
+    return {
+        "positive": _MOD_GUIDANCE_QUALITY_TAGS,
+        "negative": _MOD_GUIDANCE_QUALITY_NEG,
+        "mod_w_profile": _MOD_GUIDANCE_PROFILE,
+        "refresh_ratio": _MOD_GUIDANCE_REFRESH_RATIO,
+        "adaptive_smc_alpha": _MOD_GUIDANCE_ADAPTIVE_SMC_ALPHA,
+    }
+
+
+def _resolve_spectrum_mod_options(options):
+    if options is None:
+        print(
+            "[1st sampler] Spectrum Mod Guidance 옵션 미연결 · "
+            "기존 기본값을 사용합니다"
+        )
+        return _default_spectrum_mod_options()
+    if not isinstance(options, dict):
+        raise ValueError(
+            "spectrum_options는 Spectrum Mod Guidance Options 노드의 출력이어야 "
+            f"합니다: type={type(options)!r}"
+        )
+
+    missing = [
+        key for key in _default_spectrum_mod_options()
+        if key not in options
+    ]
+    if missing:
+        raise ValueError(f"spectrum_options 필수 값이 없습니다: {missing}")
+
+    positive = options["positive"]
+    negative = options["negative"]
+    if not isinstance(positive, str):
+        raise ValueError(f"spectrum_options.positive는 문자열이어야 합니다: {positive!r}")
+    if not isinstance(negative, str):
+        raise ValueError(f"spectrum_options.negative는 문자열이어야 합니다: {negative!r}")
+
+    profile_name = str(options["mod_w_profile"] or "").strip()
+    if profile_name not in _MOD_GUIDANCE_PROFILE_CHOICES:
+        raise ValueError(
+            f"지원하지 않는 mod_w_profile입니다: {profile_name!r} "
+            f"(지원값: {', '.join(_MOD_GUIDANCE_PROFILE_CHOICES)})"
+        )
+
+    try:
+        refresh_ratio = float(options["refresh_ratio"])
+        adaptive_smc_alpha = float(options["adaptive_smc_alpha"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "spectrum_options의 refresh_ratio와 adaptive_smc_alpha는 숫자여야 "
+            f"합니다: refresh_ratio={options['refresh_ratio']!r}, "
+            f"adaptive_smc_alpha={options['adaptive_smc_alpha']!r}"
+        ) from exc
+    if not math.isfinite(refresh_ratio) or not -1.0 <= refresh_ratio <= 1.0:
+        raise ValueError(
+            "spectrum_options.refresh_ratio는 -1.0~1.0의 유한수여야 합니다: "
+            f"{refresh_ratio!r}"
+        )
+    if not math.isfinite(adaptive_smc_alpha) or not 0.0 <= adaptive_smc_alpha <= 1.0:
+        raise ValueError(
+            "spectrum_options.adaptive_smc_alpha는 0.0~1.0의 유한수여야 합니다: "
+            f"{adaptive_smc_alpha!r}"
+        )
+    return {
+        "positive": positive.strip(),
+        "negative": negative.strip(),
+        "mod_w_profile": profile_name,
+        "refresh_ratio": refresh_ratio,
+        "adaptive_smc_alpha": adaptive_smc_alpha,
+    }
+
+
+class SoyaSpectrumModGuidanceOptions_mdsoya:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "positive": (
+                    "STRING",
+                    {
+                        "default": _MOD_GUIDANCE_QUALITY_TAGS,
+                        "multiline": True,
+                        "dynamicPrompts": True,
+                        "tooltip": "Mod Guidance가 향하도록 만들 품질 프롬프트입니다.",
+                    },
+                ),
+                "negative": (
+                    "STRING",
+                    {
+                        "default": _MOD_GUIDANCE_QUALITY_NEG,
+                        "multiline": True,
+                        "dynamicPrompts": True,
+                        "tooltip": "Mod Guidance 품질 축의 반대편 프롬프트입니다.",
+                    },
+                ),
+                "mod_w_profile": (
+                    _MOD_GUIDANCE_PROFILE_CHOICES,
+                    {"default": _MOD_GUIDANCE_PROFILE},
+                ),
+                "refresh_ratio": (
+                    "FLOAT",
+                    {
+                        "default": _MOD_GUIDANCE_REFRESH_RATIO,
+                        "min": -1.0,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "round": 0.001,
+                        "tooltip": (
+                            "-1 = 기존 window 스케줄, 0 = SEA 자동, "
+                            "0보다 크면 SEA 명시 비율"
+                        ),
+                    },
+                ),
+                "adaptive_smc_alpha": (
+                    "FLOAT",
+                    {
+                        "default": _MOD_GUIDANCE_ADAPTIVE_SMC_ALPHA,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.05,
+                        "round": 0.001,
+                    },
+                ),
+            }
+        }
+
+    RETURN_TYPES = (_SPECTRUM_MOD_OPTIONS_TYPE,)
+    RETURN_NAMES = ("spectrum_options",)
+    FUNCTION = "build"
+    CATEGORY = "sampling"
+    DESCRIPTION = (
+        "1st sampler의 SpectrumKSamplerModGuidance 모드에서 사용할 품질 프롬프트, "
+        "Mod Guidance 프로필, SEA 비율과 adaptive SMC alpha를 묶어 전달합니다."
+    )
+
+    def build(
+        self,
+        positive,
+        negative,
+        mod_w_profile,
+        refresh_ratio,
+        adaptive_smc_alpha,
+    ):
+        try:
+            options = _resolve_spectrum_mod_options({
+                "positive": positive,
+                "negative": negative,
+                "mod_w_profile": mod_w_profile,
+                "refresh_ratio": refresh_ratio,
+                "adaptive_smc_alpha": adaptive_smc_alpha,
+            })
+            print(
+                "[Spectrum Mod Guidance Options] 옵션 생성: "
+                f"profile={options['mod_w_profile']}, "
+                f"refresh_ratio={options['refresh_ratio']:.3f}, "
+                f"adaptive_smc_alpha={options['adaptive_smc_alpha']:.3f}"
+            )
+            return (options,)
+        except Exception as exc:
+            print(f"[Spectrum Mod Guidance Options] 옵션 생성 실패: error={exc}")
+            traceback.print_exc()
+            raise
 
 
 def _spectrum_mod_guidance_runtime():
@@ -412,8 +606,18 @@ class SoyaFirstSampler_mdsoya:
                         "tooltip": (
                             "KSampler = 원본 ComfyUI KSampler, "
                             "FAST = Spectrum SPD/SPEED 가속 sampler, "
-                            "SpectrumKSamplerModGuidance = 개인용 고정 Mod Guidance + "
-                            "legacy window Spectrum sampler"
+                            "SpectrumKSamplerModGuidance = 옵션형 Mod Guidance + "
+                            "Spectrum window/SEA sampler"
+                        ),
+                    },
+                ),
+                "spectrum_options": (
+                    _SPECTRUM_MOD_OPTIONS_TYPE,
+                    {
+                        "tooltip": (
+                            "Spectrum Mod Guidance Options 노드 출력입니다. "
+                            "SpectrumKSamplerModGuidance 모드에서만 사용하며, "
+                            "미연결 시 기존 고정값을 사용합니다."
                         ),
                     },
                 ),
@@ -428,7 +632,7 @@ class SoyaFirstSampler_mdsoya:
         "ANIMA_MODEL_WO_CHAR와 LORA_DATA를 받아 캐릭터 LoRA를 내부 적용합니다. "
         "MULTI_CHAR=true이면 캐릭터 LoRA를 한 번 병합하고 RGB 마스크별 프롬프트를 "
         "Anima Regional Attention 단일 패스로 처리합니다. sampler_mode에서 원본 "
-        "ComfyUI KSampler, Spectrum SPD/SPEED FAST sampler 또는 고정 프로필 "
+        "ComfyUI KSampler, Spectrum SPD/SPEED FAST sampler 또는 옵션형 "
         "Spectrum Mod Guidance sampler를 선택할 수 있습니다."
     )
 
@@ -635,34 +839,47 @@ class SoyaFirstSampler_mdsoya:
         negative,
         latent_image,
         denoise,
+        spectrum_options=None,
     ):
-        if clip is None:
+        options = _resolve_spectrum_mod_options(spectrum_options)
+        profile_name = options["mod_w_profile"]
+        if clip is None and profile_name != _MOD_GUIDANCE_PROFILE_OFF:
             message = "SpectrumKSamplerModGuidance 실행에 CLIP 입력이 필요합니다"
             print(f"[1st sampler] {message}")
             raise ValueError(message)
 
         setup_mod_guidance, spectrum_sample = _spectrum_mod_guidance_runtime()
-        mod_model = model.clone()
-        setup_mod_guidance(
-            mod_model,
-            clip,
-            positive,
-            negative,
-            None,
-            _MOD_GUIDANCE_QUALITY_TAGS,
-            _MOD_GUIDANCE_WEIGHT,
-            quality_neg=_MOD_GUIDANCE_QUALITY_NEG,
-            start_layer=_MOD_GUIDANCE_START_LAYER,
-            end_layer=_MOD_GUIDANCE_END_LAYER,
-            taper=0,
-            taper_scale=0.25,
-            final_w=0.0,
-        )
+        if profile_name == _MOD_GUIDANCE_PROFILE_OFF:
+            mod_model = model
+            print("[1st sampler] mod_w_profile=off · Mod Guidance 적용 생략")
+        else:
+            profile = _MOD_GUIDANCE_PROFILES[profile_name]
+            mod_model = model.clone()
+            setup_mod_guidance(
+                mod_model,
+                clip,
+                positive,
+                negative,
+                None,
+                options["positive"],
+                profile["w"],
+                quality_neg=options["negative"],
+                start_layer=profile["start_layer"],
+                end_layer=profile["end_layer"],
+                taper=profile["taper"],
+                taper_scale=profile["taper_scale"],
+                final_w=profile["final_w"],
+            )
+
+        refresh_ratio = options["refresh_ratio"]
+        schedule = "window" if refresh_ratio < 0.0 else "sea"
+        if schedule == "window":
+            refresh_ratio = -1.0
         print(
-            "[1st sampler] SpectrumKSamplerModGuidance 고정 프로필 적용: "
-            f"profile={_MOD_GUIDANCE_PROFILE}, "
-            f"adaptive_smc_alpha={_MOD_GUIDANCE_ADAPTIVE_SMC_ALPHA:.2f}, "
-            f"refresh_ratio={_MOD_GUIDANCE_REFRESH_RATIO:.1f}"
+            "[1st sampler] SpectrumKSamplerModGuidance 옵션 적용: "
+            f"profile={profile_name}, "
+            f"adaptive_smc_alpha={options['adaptive_smc_alpha']:.3f}, "
+            f"schedule={schedule}, refresh_ratio={refresh_ratio:.3f}"
         )
         return spectrum_sample(
             mod_model,
@@ -677,10 +894,10 @@ class SoyaFirstSampler_mdsoya:
             denoise,
             **_SPECTRUM_DEFAULTS,
             dcw_mode="off",
-            smc_cfg_alpha=_MOD_GUIDANCE_ADAPTIVE_SMC_ALPHA,
+            smc_cfg_alpha=options["adaptive_smc_alpha"],
             smc_cfg_lambda=5.0,
-            schedule="window",
-            refresh_ratio=_MOD_GUIDANCE_REFRESH_RATIO,
+            schedule=schedule,
+            refresh_ratio=refresh_ratio,
         )
 
     def _sample_selected(
@@ -701,7 +918,16 @@ class SoyaFirstSampler_mdsoya:
         spd_scale,
         spd_sigma,
         adaptive_smc_alpha,
+        spectrum_options=None,
     ):
+        if (
+            spectrum_options is not None
+            and sampler_mode != _SAMPLER_MODE_SPECTRUM_MOD_GUIDANCE
+        ):
+            print(
+                "[1st sampler] spectrum_options 입력은 "
+                f"sampler_mode={sampler_mode!r}에서 사용하지 않습니다"
+            )
         if sampler_mode == _SAMPLER_MODE_KSAMPLER:
             return self._sample_stock_padded(
                 model,
@@ -745,6 +971,7 @@ class SoyaFirstSampler_mdsoya:
                 negative,
                 latent_image,
                 denoise,
+                spectrum_options,
             )
         raise ValueError(
             f"지원하지 않는 sampler_mode입니다: {sampler_mode!r} "
@@ -773,6 +1000,7 @@ class SoyaFirstSampler_mdsoya:
         spd_sigma,
         adaptive_smc_alpha,
         sampler_mode=_SAMPLER_MODE_FAST,
+        spectrum_options=None,
     ):
         try:
             payload = _parse_multi_char(multi_char)
@@ -800,6 +1028,7 @@ class SoyaFirstSampler_mdsoya:
                     spd_scale,
                     spd_sigma,
                     adaptive_smc_alpha,
+                    spectrum_options,
                 )
                 return result[0], global_model
 
@@ -904,6 +1133,7 @@ class SoyaFirstSampler_mdsoya:
                 spd_scale,
                 spd_sigma,
                 adaptive_smc_alpha,
+                spectrum_options,
             )
             # 후단 HRF/디테일러에는 전역 all-character LoRA 모델이 아니라
             # 원래 clean model을 넘겨 첫 패스의 영역 분리를 재오염하지 않는다.

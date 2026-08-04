@@ -67,7 +67,10 @@ from .soya_asset_v2_prompt_parser import SoyaAssetV2PromptParser_mdsoya
 from .soya_qwen_edit_prompt_parser import SoyaQwenEditPromptParser_mdsoya
 from .soya_qwen_edit_conditioning import SoyaQwenEditConditioning_mdsoya
 from .soya_anima_lllite import SoyaAnimaLLLiteApply_mdsoya
-from .soya_first_sampler import SoyaFirstSampler_mdsoya
+from .soya_first_sampler import (
+    SoyaFirstSampler_mdsoya,
+    SoyaSpectrumModGuidanceOptions_mdsoya,
+)
 
 # main-only nodes (for 배포예정_삽화_V3 + ray scheduler)
 from .soya_process_divider import SoyaProcessDivider_mdsoya
@@ -148,6 +151,7 @@ NODE_CLASS_MAPPINGS = {
     "SoyaQwenEditConditioning_mdsoya": SoyaQwenEditConditioning_mdsoya,
     "SoyaAnimaLLLiteApply_mdsoya": SoyaAnimaLLLiteApply_mdsoya,
     "SoyaFirstSampler_mdsoya": SoyaFirstSampler_mdsoya,
+    "SoyaSpectrumModGuidanceOptions_mdsoya": SoyaSpectrumModGuidanceOptions_mdsoya,
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": SoyaProcessDivider_mdsoya,
     "SoyaProcessCollector_mdsoya": SoyaProcessCollector_mdsoya,
@@ -229,6 +233,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaQwenEditConditioning_mdsoya": "Qwen Edit Conditioning v2 (Soya)",
     "SoyaAnimaLLLiteApply_mdsoya": "Anima LLLite Inpainting Apply (Soya)",
     "SoyaFirstSampler_mdsoya": "1st sampler",
+    "SoyaSpectrumModGuidanceOptions_mdsoya": "Spectrum Mod Guidance Options",
     # main-only (V3 + ray)
     "SoyaProcessDivider_mdsoya": "Soya Process Divider (Soya)",
     "SoyaProcessCollector_mdsoya": "Soya Process Collector (Soya)",
