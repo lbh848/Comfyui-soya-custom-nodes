@@ -292,17 +292,20 @@ def _resolve_lora_path(lora_path):
     raw = str(lora_path or "").strip()
     if not raw:
         raise ValueError("LoRA 경로가 비어 있습니다")
-    if os.path.isfile(raw):
-        return os.path.realpath(raw)
+    # 워크플로우에는 Windows 경로 구분자가 저장될 수 있지만 Modal 컨테이너는
+    # Linux에서 실행된다. folder_paths에 넘기기 전에 이식 가능한 형식으로 맞춘다.
+    normalized = raw.replace("\\", "/")
+    if os.path.isfile(normalized):
+        return os.path.realpath(normalized)
     try:
-        resolved = folder_paths.get_full_path("loras", raw)
+        resolved = folder_paths.get_full_path("loras", normalized)
         if resolved and os.path.isfile(resolved):
             return os.path.realpath(resolved)
     except Exception as exc:
         print(f"[1st sampler] folder_paths LoRA 경로 조회 실패: path={raw!r}, error={exc}")
         traceback.print_exc()
     for base in folder_paths.get_folder_paths("loras"):
-        candidate = os.path.join(base, raw)
+        candidate = os.path.join(base, normalized)
         if os.path.isfile(candidate):
             return os.path.realpath(candidate)
     raise FileNotFoundError(f"LoRA 파일을 찾지 못했습니다: {raw}")

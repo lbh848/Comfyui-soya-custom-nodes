@@ -95,6 +95,26 @@ class FirstSamplerTests(unittest.TestCase):
             "SOYA_SPECTRUM_MOD_GUIDANCE_OPTIONS",
         )
 
+    def test_lora_path_normalizes_windows_separators_for_linux(self):
+        raw = r"SOYA_CHAR_LORA\SOYA_BOT_LORA\character\model.safetensors"
+        normalized = "SOYA_CHAR_LORA/SOYA_BOT_LORA/character/model.safetensors"
+        resolved = f"/loras/{normalized}"
+
+        with (
+            mock.patch.object(MODULE.os.path, "isfile", side_effect=lambda path: path == resolved),
+            mock.patch.object(MODULE.os.path, "realpath", side_effect=lambda path: path),
+            mock.patch.object(
+                MODULE.folder_paths,
+                "get_full_path",
+                return_value=resolved,
+                create=True,
+            ) as get_full_path,
+        ):
+            result = MODULE._resolve_lora_path(raw)
+
+        self.assertEqual(result, resolved)
+        get_full_path.assert_called_once_with("loras", normalized)
+
     def test_spectrum_options_node_exposes_current_defaults(self):
         input_types = SpectrumOptions.INPUT_TYPES()["required"]
 
