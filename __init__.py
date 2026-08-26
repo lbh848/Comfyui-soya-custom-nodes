@@ -48,6 +48,7 @@ from .soya_ipadapter_weight_calc import SoyaIPAdapterWeightCalc_mdsoya
 from .soya_batch_lora_loader import SoyaBatchLoraLoader_mdsoya
 from .soya_scale_by import SoyaScaleBy_mdsoya
 from .soya_filter_images_by_name import FilterImagesByName_mdsoya
+from .soya_optional_image_by_name import SoyaOptionalImageByName_mdsoya
 from .soya_detect_and_crop import SoyaDetectAndCrop_mdsoya
 from .soya_clip_embed_saver import SoyaClipEmbedSaver_mdsoya
 from .soya_face_embed_cache_v2 import SoyaFaceEmbedCacheV2_mdsoya
@@ -66,6 +67,7 @@ from .soya_prompt_parser import SoyaPromptParser_mdsoya
 from .soya_asset_v2_prompt_parser import SoyaAssetV2PromptParser_mdsoya
 from .soya_qwen_edit_prompt_parser import SoyaQwenEditPromptParser_mdsoya
 from .soya_qwen_edit_conditioning import SoyaQwenEditConditioning_mdsoya
+from .soya_minimax_h3_ref2image import SoyaMiniMaxH3ReferenceToImage_mdsoya
 from .soya_anima_lllite import SoyaAnimaLLLiteApply_mdsoya
 from .soya_first_sampler import (
     SoyaFirstSampler_mdsoya,
@@ -131,6 +133,7 @@ NODE_CLASS_MAPPINGS = {
     "SoyaBatchLoraLoader_mdsoya": SoyaBatchLoraLoader_mdsoya,
     "SoyaScaleBy_mdsoya": SoyaScaleBy_mdsoya,
     "FilterImagesByName_mdsoya": FilterImagesByName_mdsoya,
+    "SoyaOptionalImageByName_mdsoya": SoyaOptionalImageByName_mdsoya,
     "SoyaDetectAndCrop_mdsoya": SoyaDetectAndCrop_mdsoya,
     "SoyaClipEmbedSaver_mdsoya": SoyaClipEmbedSaver_mdsoya,
     "SoyaFaceEmbedCacheV2_mdsoya": SoyaFaceEmbedCacheV2_mdsoya,
@@ -149,6 +152,7 @@ NODE_CLASS_MAPPINGS = {
     "SoyaAssetV2PromptParser_mdsoya": SoyaAssetV2PromptParser_mdsoya,
     "SoyaQwenEditPromptParser_mdsoya": SoyaQwenEditPromptParser_mdsoya,
     "SoyaQwenEditConditioning_mdsoya": SoyaQwenEditConditioning_mdsoya,
+    "SoyaMiniMaxH3ReferenceToImage_mdsoya": SoyaMiniMaxH3ReferenceToImage_mdsoya,
     "SoyaAnimaLLLiteApply_mdsoya": SoyaAnimaLLLiteApply_mdsoya,
     "SoyaFirstSampler_mdsoya": SoyaFirstSampler_mdsoya,
     "SoyaSpectrumModGuidanceOptions_mdsoya": SoyaSpectrumModGuidanceOptions_mdsoya,
@@ -213,6 +217,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaBatchLoraLoader_mdsoya": "Batch LoRA Loader (Soya)",
     "SoyaScaleBy_mdsoya": "Scale By (Soya)",
     "FilterImagesByName_mdsoya": "Filter Images By Name (Soya)",
+    "SoyaOptionalImageByName_mdsoya": "Optional Image By Name (Soya)",
     "SoyaDetectAndCrop_mdsoya": "Detect And Crop (Soya)",
     "SoyaClipEmbedSaver_mdsoya": "CLIP Embed Saver (Soya)",
     "SoyaFaceEmbedCacheV2_mdsoya": "Face Embed Cache V2 (Soya)",
@@ -231,6 +236,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaAssetV2PromptParser_mdsoya": "Asset V2 Prompt Parser (Soya)",
     "SoyaQwenEditPromptParser_mdsoya": "Qwen Edit Prompt Parser (Soya)",
     "SoyaQwenEditConditioning_mdsoya": "Qwen Edit Conditioning v2 (Soya)",
+    "SoyaMiniMaxH3ReferenceToImage_mdsoya": "MiniMax H3 REF2I T=1 (Soya Experimental)",
     "SoyaAnimaLLLiteApply_mdsoya": "Anima LLLite Inpainting Apply (Soya)",
     "SoyaFirstSampler_mdsoya": "1st sampler",
     "SoyaSpectrumModGuidanceOptions_mdsoya": "Spectrum Mod Guidance Options",

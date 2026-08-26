@@ -5,13 +5,15 @@ For each face in face_context:
   1. Identify character → find matching LoRA (filtered by base_model)
   2. Apply ONLY that character's LoRA to a fresh copy of the original model
   3. Assemble prompt: artist_tags + quality_tags + FACE_TAGS + EYE_TAGS + POSITIVE
-  4. Crop face region from image (8-aligned coords, crop_expand_factor padding)
+  4. Crop face region from image (VAE-aligned size, crop_expand_factor padding)
   5. Upscale crop by upscale_factor for higher-resolution processing
   6. VAE encode → KSampler → VAE decode → downscale back → paste with feathered mask
 """
 
 import os
 import json
+import math
+import traceback
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -95,6 +97,102 @@ def _resolve_upscale_factor(lora_entry, upscale_factor, actual_w, actual_h):
     if size_factor <= 1.0:
         return 1.0, f"target {int(target)}px SKIPPED (longest side {int(longest)}px already >= target)"
     return size_factor, f"target {int(target)}px longest → x{size_factor:.3f} (from {int(longest)}px)"
+
+
+def _get_vae_spatial_compression(vae):
+    """Return the VAE's required spatial multiple with explicit diagnostics."""
+    try:
+        compression = int(vae.spacial_compression_encode())
+        if compression < 1:
+            raise ValueError(
+                f"invalid VAE spatial compression ratio: {compression}"
+            )
+        return compression
+    except Exception as exc:
+        print(
+            "[SoyaCharLoraFaceDetailer] FAILED to resolve VAE spatial "
+            f"compression: vae={type(vae).__name__}, error={exc}"
+        )
+        traceback.print_exc()
+        raise
+
+
+def _round_up_to_multiple(value, multiple):
+    return ((int(value) + multiple - 1) // multiple) * multiple
+
+
+def _fit_vae_crop_bounds(
+    cr_x1,
+    cr_y1,
+    cr_x2,
+    cr_y2,
+    image_w,
+    image_h,
+    crop_expand_factor,
+    spatial_compression,
+):
+    """Fit a VAE-aligned crop inside the image without resizing it.
+
+    Only the crop dimensions need to be aligned. When a centered crop crosses an
+    image edge, the whole window is shifted inward so its aligned size is kept.
+    """
+    if spatial_compression < 1:
+        raise ValueError(
+            f"spatial_compression must be positive, got {spatial_compression}"
+        )
+    if image_w < spatial_compression or image_h < spatial_compression:
+        raise ValueError(
+            "image is smaller than one VAE spatial block: "
+            f"image={image_w}x{image_h}, compression={spatial_compression}"
+        )
+
+    cr_w = cr_x2 - cr_x1
+    cr_h = cr_y2 - cr_y1
+    if cr_w <= 0 or cr_h <= 0:
+        raise ValueError(
+            "face crop must have positive dimensions: "
+            f"crop=({cr_x1},{cr_y1},{cr_x2},{cr_y2})"
+        )
+
+    requested_w = max(
+        spatial_compression,
+        _round_up_to_multiple(cr_w * crop_expand_factor, spatial_compression),
+    )
+    requested_h = max(
+        spatial_compression,
+        _round_up_to_multiple(cr_h * crop_expand_factor, spatial_compression),
+    )
+
+    crop_w = min(
+        requested_w,
+        (image_w // spatial_compression) * spatial_compression,
+    )
+    crop_h = min(
+        requested_h,
+        (image_h // spatial_compression) * spatial_compression,
+    )
+
+    def fit_axis(face_start, face_end, image_size, crop_size):
+        centered_start = math.floor(
+            ((face_start + face_end) / 2.0) - (crop_size / 2.0)
+        )
+        max_start = image_size - crop_size
+
+        # Preserve the visible face region whenever it fits in the crop. These
+        # bounds also shift edge crops inward without shrinking their size.
+        visible_start = max(0, min(image_size, face_start))
+        visible_end = max(0, min(image_size, face_end))
+        lower = max(0, visible_end - crop_size)
+        upper = min(max_start, visible_start)
+        if lower <= upper:
+            start = min(max(centered_start, lower), upper)
+        else:
+            start = min(max(centered_start, 0), max_start)
+        return int(start), int(start + crop_size)
+
+    cx1, cx2 = fit_axis(cr_x1, cr_x2, image_w, crop_w)
+    cy1, cy2 = fit_axis(cr_y1, cr_y2, image_h, crop_h)
+    return cx1, cy1, cx2, cy2
 
 
 def _parse_inputs(char_tags, lora_list, base_model):
@@ -320,6 +418,7 @@ class SoyaCharLoraFaceDetailer_mdsoya:
         combined_mask = torch.zeros((B, H, W), dtype=torch.float32)
         crop_region = torch.zeros((B, H, W), dtype=torch.float32)
         log_lines = []
+        spatial_compression = _get_vae_spatial_compression(vae)
 
         # Encode negative once (shared across all faces)
         negative_cond = _encode_conditioning(clip, negative)
@@ -374,50 +473,28 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                 cr_w, cr_h = cr_x2 - cr_x1, cr_y2 - cr_y1
                 cr_cx, cr_cy = (cr_x1 + cr_x2) / 2.0, (cr_y1 + cr_y2) / 2.0
 
-                # Apply crop_expand_factor for additional context padding
-                ew = cr_w * crop_expand_factor
-                eh = cr_h * crop_expand_factor
-
-                # Round UP crop dimensions to multiple of 8
-                crop_w = ((int(ew) + 7) // 8) * 8
-                crop_h = ((int(eh) + 7) // 8) * 8
-
-                if crop_w < 8 or crop_h < 8:
-                    log_lines.append(f"  {name} — crop too small ({crop_w}x{crop_h})")
+                if cr_w <= 0 or cr_h <= 0:
+                    message = (
+                        f"{name} — invalid face crop "
+                        f"({cr_x1},{cr_y1},{cr_x2},{cr_y2})"
+                    )
+                    print(f"[SoyaCharLoraFaceDetailer] SKIPPED: {message}")
+                    log_lines.append(f"  {message}")
                     continue
 
-                # Center the crop, align start to multiple of 8
-                cx1 = (int(cr_cx - crop_w / 2) // 8) * 8
-                cy1 = (int(cr_cy - crop_h / 2) // 8) * 8
-                cx2 = cx1 + crop_w
-                cy2 = cy1 + crop_h
-
-                # Shift left/up if extends past image edge (re-align to 8)
-                if cx2 > W:
-                    cx1 = max(0, (W - crop_w) // 8 * 8)
-                    cx2 = cx1 + crop_w
-                if cy2 > H:
-                    cy1 = max(0, (H - crop_h) // 8 * 8)
-                    cy2 = cy1 + crop_h
-
-                # Final clamp (crop may be larger than image)
-                cx1 = max(0, cx1)
-                cy1 = max(0, cy1)
-                cx2 = min(W, cx2)
-                cy2 = min(H, cy2)
-
-                # Ensure crop fully contains the original face region (8-aligned)
-                # 8-alignment can shift the crop so original area pokes out at edges
-                cx1 = min(cx1, (cr_x1 // 8) * 8)
-                cy1 = min(cy1, (cr_y1 // 8) * 8)
-                cx2 = max(cx2, ((cr_x2 + 7) // 8) * 8)
-                cy2 = max(cy2, ((cr_y2 + 7) // 8) * 8)
-
-                # Re-clamp after containment expansion
-                cx1 = max(0, cx1)
-                cy1 = max(0, cy1)
-                cx2 = min(W, cx2)
-                cy2 = min(H, cy2)
+                # Keep the final crop dimensions aligned to the actual VAE.
+                # At image edges, shift the crop inward instead of clamping and
+                # shrinking it to a non-aligned size.
+                cx1, cy1, cx2, cy2 = _fit_vae_crop_bounds(
+                    cr_x1,
+                    cr_y1,
+                    cr_x2,
+                    cr_y2,
+                    W,
+                    H,
+                    crop_expand_factor,
+                    spatial_compression,
+                )
                 actual_w, actual_h = cx2 - cx1, cy2 - cy1
 
                 # ── Crop from original image ──
@@ -471,8 +548,12 @@ class SoyaCharLoraFaceDetailer_mdsoya:
 
                 # ── Upscale for processing ──
                 if eff_upscale > 1.0:
-                    process_w = ((int(actual_w * eff_upscale) + 7) // 8) * 8
-                    process_h = ((int(actual_h * eff_upscale) + 7) // 8) * 8
+                    process_w = _round_up_to_multiple(
+                        actual_w * eff_upscale, spatial_compression
+                    )
+                    process_h = _round_up_to_multiple(
+                        actual_h * eff_upscale, spatial_compression
+                    )
 
                     crop_pil = Image.fromarray((crop_tensor.cpu().numpy() * 255).astype(np.uint8))
                     crop_pil = crop_pil.resize((process_w, process_h), Image.Resampling.LANCZOS)
@@ -512,6 +593,20 @@ class SoyaCharLoraFaceDetailer_mdsoya:
                     enhanced_pil = Image.fromarray(enhanced_np)
                     enhanced_pil = enhanced_pil.resize((actual_w, actual_h), Image.Resampling.LANCZOS)
                     enhanced_crop = torch.from_numpy(np.array(enhanced_pil).astype(np.float32) / 255.0)
+
+                if (
+                    enhanced_crop.shape[0] != actual_h
+                    or enhanced_crop.shape[1] != actual_w
+                ):
+                    message = (
+                        "VAE output size does not match the aligned crop: "
+                        f"crop={actual_w}x{actual_h}, "
+                        f"output={enhanced_crop.shape[1]}x{enhanced_crop.shape[0]}, "
+                        f"compression={spatial_compression}, "
+                        f"bounds=({cx1},{cy1},{cx2},{cy2})"
+                    )
+                    print(f"[SoyaCharLoraFaceDetailer] FAILED: {message}")
+                    raise RuntimeError(message)
 
                 # ── Paste back with feathered mask ──
                 alpha = mask.unsqueeze(-1)

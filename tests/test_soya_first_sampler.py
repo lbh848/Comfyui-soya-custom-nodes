@@ -48,10 +48,11 @@ def _load_module():
         module = importlib.util.module_from_spec(spec)
         sys.modules[MODULE_NAME] = module
         spec.loader.exec_module(module)
-    return module
+        spectrum_core = sys.modules[f"{PACKAGE_NAME}.soya_spectrum_mod_guidance"]
+    return module, spectrum_core
 
 
-MODULE = _load_module()
+MODULE, SPECTRUM_CORE = _load_module()
 FirstSampler = MODULE.SoyaFirstSampler_mdsoya
 SpectrumOptions = MODULE.SoyaSpectrumModGuidanceOptions_mdsoya
 
@@ -236,7 +237,7 @@ class FirstSamplerTests(unittest.TestCase):
         spectrum_sample = mock.Mock(return_value=("sampled",))
 
         with mock.patch.object(
-            MODULE,
+            SPECTRUM_CORE,
             "_spectrum_mod_guidance_runtime",
             return_value=(setup_mod_guidance, spectrum_sample),
         ):
@@ -313,7 +314,7 @@ class FirstSamplerTests(unittest.TestCase):
         }
 
         with mock.patch.object(
-            MODULE,
+            SPECTRUM_CORE,
             "_spectrum_mod_guidance_runtime",
             return_value=(setup_mod_guidance, spectrum_sample),
         ):
@@ -366,7 +367,7 @@ class FirstSamplerTests(unittest.TestCase):
         }
 
         with mock.patch.object(
-            MODULE,
+            SPECTRUM_CORE,
             "_spectrum_mod_guidance_runtime",
             return_value=(setup_mod_guidance, spectrum_sample),
         ):
