@@ -1,4 +1,4 @@
-"""Selectable stock/Spectrum samplers with optional Anima regional conditioning."""
+"""Stock/Spectrum sampling with masked, per-character Anima LoRA hooks."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import traceback
 from collections import OrderedDict
 
 import comfy.hooks
+from .soya_character_lora import load_character_lora
 import comfy.samplers
 import comfy.sd
 import comfy.utils
@@ -18,10 +19,6 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from .anima_regional_conditioning import (
-    AnimaConditioningRegionChain,
-    ApplyAnimaRegionalConditioningPatch,
-)
 from .soya_spectrum_mod_guidance import (
     _SPECTRUM_MOD_OPTIONS_TYPE,
     SoyaSpectrumModGuidanceOptions_mdsoya,
@@ -396,8 +393,8 @@ class SoyaFirstSampler_mdsoya:
     CATEGORY = "sampling"
     DESCRIPTION = (
         "ANIMA_MODEL_WO_CHAR와 LORA_DATA를 받아 캐릭터 LoRA를 내부 적용합니다. "
-        "MULTI_CHAR=true이면 캐릭터 LoRA를 한 번 병합하고 RGB 마스크별 프롬프트를 "
-        "Anima Regional Attention 단일 패스로 처리합니다. sampler_mode에서 원본 "
+        "MULTI_CHAR=true이면 각 캐릭터의 LoRA와 프롬프트를 따로 계산하고 "
+        "RGB 마스크 영역별로 반영합니다. 배경에는 공통 모델만 사용합니다. sampler_mode에서 원본 "
         "ComfyUI KSampler, Spectrum SPD/SPEED FAST sampler 또는 옵션형 "
         "Spectrum Mod Guidance sampler를 선택할 수 있습니다."
     )
@@ -459,12 +456,10 @@ class SoyaFirstSampler_mdsoya:
             name = entry["character"]
             lora, resolved = self._load_lora(entry)
             try:
-                registered_model, _, new_hooks = comfy.hooks.load_hook_lora_for_models(
+                registered_model, new_hooks = load_character_lora(
                     registered_model,
-                    None,
                     lora,
                     entry["strength"],
-                    0.0,
                 )
             except Exception as exc:
                 print(
@@ -762,15 +757,11 @@ class SoyaFirstSampler_mdsoya:
             )
             masks = _load_channel_masks(mask_location, payload["char_num"])
 
-            regional_model = self._apply_global_loras(model, lora_entries)
-            lora_counts = {
-                name: sum(
-                    1 for entry in lora_entries
-                    if entry["character"].casefold() == name.casefold()
-                )
-                for name in payload["char_name_list"]
-            }
-            regions = None
+            regional_model, character_hooks, lora_counts = self._build_character_hooks(
+                model, lora_entries, payload["char_name_list"]
+            )
+            regional_positive = []
+            regional_negative = []
             region_prompts = []
             for index in range(payload["char_num"]):
                 prompt_parts = (
@@ -783,12 +774,15 @@ class SoyaFirstSampler_mdsoya:
                 prompt = ", ".join(part for part in prompt_parts if part)
                 tokens = clip.tokenize(prompt)
                 conditioning = clip.encode_from_tokens_scheduled(tokens)
-                regions = AnimaConditioningRegionChain(
-                    previous=regions,
+                positive_region, negative_region = comfy.hooks.set_conds_props(
+                    [conditioning, negative],
+                    strength=1.0,
+                    set_cond_area="default",
                     mask=masks[index],
-                    conditioning=conditioning,
-                    weight=1.0,
+                    hooks=character_hooks[index],
                 )
+                regional_positive.extend(positive_region)
+                regional_negative.extend(negative_region)
                 region_prompts.append(prompt)
 
             background_parts = (
@@ -811,28 +805,13 @@ class SoyaFirstSampler_mdsoya:
             background_conditioning = clip.encode_from_tokens_scheduled(
                 clip.tokenize(background_prompt)
             )
-            regional_model = ApplyAnimaRegionalConditioningPatch().apply(
-                regional_model,
-                regions,
-                base_mode="uncovered_only",
-                base_strength=1.0,
-                end_percent=1.0,
-                cross_mask_strength=1.0,
-                self_mask_strength=0.0,
-                base_ratio=0.0,
-                cross_inject_every_n_blocks=1,
-                self_inject_every_n_blocks=1,
-                start_percent=0.0,
-                background_conditioning=background_conditioning,
-            )[0]
-            print(
-                f"[1st sampler] MULTI_CHAR Regional Attention 패치 적용: "
-                f"base_mode=uncovered_only, cross_mask_strength=1.0, "
-                f"self_mask_strength=0.0, base_ratio=0.0"
+            regional_positive, regional_negative = comfy.hooks.set_default_conds_and_combine(
+                [regional_positive, regional_negative],
+                [background_conditioning, negative],
             )
             print(
-                f"[1st sampler] MULTI_CHAR=true · 전역 캐릭터 LoRA + RGB Regional Attention "
-                f"+ {sampler_mode} 단일 패스 실행: "
+                f"[1st sampler] MULTI_CHAR=true · 캐릭터별 Hook LoRA + RGB 마스크 합성 "
+                f"+ {sampler_mode} 실행: "
                 f"order={payload['char_name_list']}, loras={lora_counts}, "
                 f"prompt_lengths={[len(p) for p in region_prompts]}, "
                 f"background_length={len(background_prompt)}, "
@@ -847,8 +826,8 @@ class SoyaFirstSampler_mdsoya:
                 cfg,
                 sampler_name,
                 scheduler,
-                background_conditioning,
-                negative,
+                regional_positive,
+                regional_negative,
                 clip,
                 latent_image,
                 denoise,

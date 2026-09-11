@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 import types
 import unittest
@@ -22,6 +23,12 @@ def _load_module():
     comfy.sd = types.ModuleType("comfy.sd")
     comfy.utils = types.ModuleType("comfy.utils")
 
+    # The sampler's multi-character path attaches hooks and masks through this
+    # ComfyUI boundary.  The behavior is supplied per test so the assertions
+    # observe the conditioning that would reach a real sampler.
+    comfy.hooks.set_conds_props = None
+    comfy.hooks.set_default_conds_and_combine = None
+
     class KSampler:
         SAMPLERS = ("euler",)
         SCHEDULERS = ("simple",)
@@ -32,6 +39,8 @@ def _load_module():
     regional = types.ModuleType(f"{PACKAGE_NAME}.anima_regional_conditioning")
     regional.AnimaConditioningRegionChain = object
     regional.ApplyAnimaRegionalConditioningPatch = object
+    character_lora = types.ModuleType(f"{PACKAGE_NAME}.soya_character_lora")
+    character_lora.load_character_lora = None
 
     modules = {
         PACKAGE_NAME: package,
@@ -42,6 +51,7 @@ def _load_module():
         "comfy.utils": comfy.utils,
         "folder_paths": folder_paths,
         f"{PACKAGE_NAME}.anima_regional_conditioning": regional,
+        f"{PACKAGE_NAME}.soya_character_lora": character_lora,
     }
     with mock.patch.dict(sys.modules, modules):
         spec = importlib.util.spec_from_file_location(MODULE_NAME, MODULE_PATH)
@@ -55,6 +65,84 @@ def _load_module():
 MODULE, SPECTRUM_CORE = _load_module()
 FirstSampler = MODULE.SoyaFirstSampler_mdsoya
 SpectrumOptions = MODULE.SoyaSpectrumModGuidanceOptions_mdsoya
+
+
+class _FakeHookGroup:
+    def __init__(self, labels):
+        self.labels = tuple(labels)
+
+    def clone_and_combine(self, other):
+        return _FakeHookGroup(self.labels + other.labels)
+
+
+class _FakeMask:
+    def __init__(self, channel):
+        self.channel = channel
+
+
+class _FakeClip:
+    def __init__(self):
+        self.prompts = []
+
+    def tokenize(self, prompt):
+        self.prompts.append(prompt)
+        return prompt
+
+    def encode_from_tokens_scheduled(self, tokens):
+        return [[tokens, {"prompt": tokens}]]
+
+
+def _multi_char_payload(names, *, infos=None, triggers=None, background="shared background"):
+    infos = infos or [f"{name} profile" for name in names]
+    triggers = triggers or [[f"{name} trigger"] for name in names]
+    return json.dumps(
+        {
+            "enable": True,
+            "char_num": len(names),
+            "char_name_list": names,
+            "char_inform": infos,
+            "char_trigger_list": triggers,
+            "background_trigger_list": ["background trigger"],
+            "shared_tag": {"before_char": ["shared before"], "after_char": ["shared after"]},
+            "background_prompt": background,
+            "composition_prompt": "two subjects in a clear composition",
+            "mask_fingerprint": "0" * 64,
+        }
+    )
+
+
+def _lora_data(entries):
+    return json.dumps(
+        {
+            "list": [
+                {
+                    "BASE": "Anima",
+                    "CHAR": character,
+                    "lora_path": filename,
+                    "str": strength,
+                }
+                for character, filename, strength in entries
+            ]
+        }
+    )
+
+
+def _conditioning_records(conditions):
+    return [
+        (entry[0], entry[1])
+        for entry in conditions
+        if isinstance(entry, (list, tuple))
+        and len(entry) >= 2
+        and isinstance(entry[1], dict)
+    ]
+
+
+def _records_for_mask(conditions, mask):
+    return [
+        (value, metadata)
+        for value, metadata in _conditioning_records(conditions)
+        if metadata.get("_test_mask") is mask
+    ]
 
 
 class FirstSamplerTests(unittest.TestCase):
@@ -78,6 +166,340 @@ class FirstSamplerTests(unittest.TestCase):
             0.1,
             spectrum_options,
         )
+
+    def _run_multi_sample(self, names, entries, *, sampler_mode="KSampler"):
+        node = FirstSampler()
+        input_model = object()
+        clip = _FakeClip()
+        masks = [
+            _FakeMask("R"),
+            _FakeMask("G"),
+            _FakeMask("B"),
+        ][: len(names)]
+        hook_calls = []
+        registered_models = []
+        sampled = object()
+
+        def load_lora(entry):
+            filename = entry["lora_path"]
+            return {"test_filename": filename}, f"/test-only/{filename}"
+
+        def load_character_lora(current_model, lora, strength_model):
+            hook_calls.append(
+                (current_model, None, lora["test_filename"], strength_model, 0.0)
+            )
+            registered_model = object()
+            registered_models.append(registered_model)
+            hooks = _FakeHookGroup([(lora["test_filename"], strength_model)])
+            return registered_model, hooks
+
+        def set_conds_props(
+            conds,
+            strength=1.0,
+            set_cond_area="default",
+            mask=None,
+            hooks=None,
+            timesteps_range=None,
+            append_hooks=True,
+        ):
+            result = []
+            for conditioning in conds:
+                copied = []
+                for value, metadata in conditioning:
+                    metadata = dict(metadata)
+                    metadata.update(
+                        {
+                            "_test_hooks": hooks,
+                            "_test_mask": mask,
+                            "_test_area": set_cond_area,
+                        }
+                    )
+                    copied.append([value, metadata])
+                result.append(copied)
+            return result
+
+        def set_default_conds_and_combine(conds, new_conds, hooks=None, timesteps_range=None):
+            result = []
+            for conditioning, default_conditioning in zip(conds, new_conds):
+                copied_default = []
+                for value, metadata in default_conditioning:
+                    metadata = dict(metadata)
+                    metadata.update(
+                        {
+                            "default": True,
+                            "_test_hooks": hooks,
+                            "_test_mask": None,
+                            "_test_area": "default",
+                        }
+                    )
+                    copied_default.append([value, metadata])
+                result.append(list(conditioning) + copied_default)
+            return result
+
+        selected = mock.Mock(return_value=(sampled,))
+        multi_char = _multi_char_payload(names)
+        with (
+            mock.patch.object(node, "_load_lora", side_effect=load_lora),
+            mock.patch.object(
+                MODULE,
+                "load_character_lora",
+                side_effect=load_character_lora,
+            ),
+            mock.patch.object(MODULE.comfy.hooks, "set_conds_props", side_effect=set_conds_props),
+            mock.patch.object(
+                MODULE.comfy.hooks,
+                "set_default_conds_and_combine",
+                side_effect=set_default_conds_and_combine,
+            ),
+            mock.patch.object(
+                node,
+                "_apply_global_loras",
+                side_effect=AssertionError("multi-character sampling must not stack character LoRAs globally"),
+            ),
+            mock.patch.object(
+                MODULE,
+                "ApplyAnimaRegionalConditioningPatch",
+                side_effect=AssertionError("multi-character sampling must not use regional patching"),
+                create=True,
+            ),
+            mock.patch.object(
+                MODULE,
+                "AnimaConditioningRegionChain",
+                side_effect=AssertionError("multi-character sampling must not build regional chains"),
+                create=True,
+            ),
+            mock.patch.object(MODULE, "_load_channel_masks", return_value=masks) as load_masks,
+            mock.patch.object(node, "_sample_selected", selected),
+        ):
+            result = node.sample(
+                model=input_model,
+                positive=[["BASE_POS", {"source": "base-positive"}]],
+                negative=[["BASE_NEG", {"source": "base-negative"}]],
+                clip=clip,
+                multi_char=multi_char,
+                seed=7,
+                latent_image={"samples": object()},
+                LORA_ACT="true",
+                LORA_DATA=_lora_data(entries),
+                mask_location="test-only-masks",
+                steps=28,
+                cfg=4.0,
+                sampler_name="euler",
+                scheduler="simple",
+                denoise=1.0,
+                split_mode="single",
+                spd_scale=0.5,
+                spd_sigma=0.7,
+                adaptive_smc_alpha=0.1,
+                sampler_mode=sampler_mode,
+            )
+
+        return {
+            "node": node,
+            "input_model": input_model,
+            "clip": clip,
+            "masks": masks,
+            "hook_calls": hook_calls,
+            "registered_models": registered_models,
+            "selected": selected,
+            "result": result,
+        }
+
+    def _assert_multi_char_conditioning(self, case, names, expected_labels):
+        selected_call = case["selected"].call_args
+        positive = selected_call.args[7]
+        negative = selected_call.args[8]
+
+        self.assertEqual(len(_conditioning_records(positive)), len(names) + 1)
+        self.assertEqual(len(_conditioning_records(negative)), len(names) + 1)
+
+        for index, name in enumerate(names):
+            with self.subTest(character=name):
+                positive_records = _records_for_mask(positive, case["masks"][index])
+                negative_records = _records_for_mask(negative, case["masks"][index])
+                self.assertEqual(len(positive_records), 1)
+                self.assertEqual(len(negative_records), 1)
+
+                positive_value, positive_metadata = positive_records[0]
+                _negative_value, negative_metadata = negative_records[0]
+                positive_hooks = positive_metadata["_test_hooks"]
+                negative_hooks = negative_metadata["_test_hooks"]
+                labels = expected_labels[index]
+                if labels is None:
+                    self.assertIsNone(positive_hooks)
+                else:
+                    self.assertEqual(positive_hooks.labels, labels)
+                self.assertIs(negative_hooks, positive_hooks)
+                self.assertIs(positive_metadata["_test_mask"], case["masks"][index])
+                self.assertIs(negative_metadata["_test_mask"], case["masks"][index])
+                self.assertEqual(positive_metadata["_test_area"], "default")
+                self.assertEqual(negative_metadata["_test_area"], "default")
+
+                # Each region receives its own prompt context.  Checking every
+                # other profile catches accidental prompt concatenation between
+                # characters even when masks and hooks look correct.
+                self.assertIn(f"{name} profile", str(positive_value))
+                for other_name in names:
+                    if other_name != name:
+                        self.assertNotIn(f"{other_name} profile", str(positive_value))
+
+        background_positive = _records_for_mask(positive, None)
+        background_negative = _records_for_mask(negative, None)
+        self.assertEqual(len(background_positive), 1)
+        self.assertEqual(len(background_negative), 1)
+        self.assertIsNone(background_positive[0][1]["_test_hooks"])
+        self.assertIsNone(background_negative[0][1]["_test_hooks"])
+        self.assertIsNone(background_positive[0][1]["_test_mask"])
+        self.assertIsNone(background_negative[0][1]["_test_mask"])
+        self.assertEqual(background_positive[0][1]["_test_area"], "default")
+        self.assertEqual(background_negative[0][1]["_test_area"], "default")
+
+    def test_multi_char_hibiki_hoshino_uses_one_hook_and_mask_per_character(self):
+        case = self._run_multi_sample(
+            ["Hibiki", "Hoshino"],
+            [
+                ("Hibiki", "test_hibiki_lora.safetensors", 0.8),
+                ("Hoshino", "test_hoshino_lora.safetensors", 0.9),
+            ],
+        )
+        self.assertEqual(case["selected"].call_args.args[0], "KSampler")
+        self.assertIs(case["selected"].call_args.args[1], case["registered_models"][-1])
+        self.assertEqual(case["result"][0], case["selected"].return_value[0])
+        self.assertIs(case["result"][1], case["input_model"])
+        self.assertEqual(case["clip"].prompts.count(""), 0)
+        self._assert_multi_char_conditioning(
+            case,
+            ["Hibiki", "Hoshino"],
+            [
+                (("test_hibiki_lora.safetensors", 0.8),),
+                (("test_hoshino_lora.safetensors", 0.9),),
+            ],
+        )
+
+        self.assertEqual(
+            [(path, strength) for _model, _clip, path, strength, _clip_strength in case["hook_calls"]],
+            [
+                ("test_hibiki_lora.safetensors", 0.8),
+                ("test_hoshino_lora.safetensors", 0.9),
+            ],
+        )
+        self.assertIs(case["selected"].call_args.args[9], case["clip"])
+        self.assertTrue(any("Hibiki profile" in prompt for prompt in case["clip"].prompts))
+        self.assertTrue(any("Hoshino profile" in prompt for prompt in case["clip"].prompts))
+
+    def test_multi_char_matches_hooks_by_name_when_order_and_lora_count_differ(self):
+        case = self._run_multi_sample(
+            ["Hoshino", "Hibiki"],
+            [
+                ("Hibiki", "test_hibiki_face.safetensors", 0.8),
+                ("Hibiki", "test_hibiki_style.safetensors", 0.2),
+                ("Hoshino", "test_hoshino_lora.safetensors", 0.9),
+            ],
+            sampler_mode="FAST",
+        )
+        self.assertEqual(case["selected"].call_args.args[0], "FAST")
+        self._assert_multi_char_conditioning(
+            case,
+            ["Hoshino", "Hibiki"],
+            [
+                (("test_hoshino_lora.safetensors", 0.9),),
+                (
+                    ("test_hibiki_face.safetensors", 0.8),
+                    ("test_hibiki_style.safetensors", 0.2),
+                ),
+            ],
+        )
+        self.assertEqual(
+            [call[2:] for call in case["hook_calls"]],
+            [
+                ("test_hibiki_face.safetensors", 0.8, 0.0),
+                ("test_hibiki_style.safetensors", 0.2, 0.0),
+                ("test_hoshino_lora.safetensors", 0.9, 0.0),
+            ],
+        )
+
+    def test_multi_char_keeps_masked_prompt_when_one_character_has_no_lora(self):
+        case = self._run_multi_sample(
+            ["Mina", "Niko"],
+            [("Mina", "test_mina_lora.safetensors", 0.65)],
+        )
+        self._assert_multi_char_conditioning(
+            case,
+            ["Mina", "Niko"],
+            [(("test_mina_lora.safetensors", 0.65),), None],
+        )
+
+        self.assertEqual(len(case["hook_calls"]), 1)
+
+    def test_multi_char_with_no_loras_keeps_all_regions_masked_without_hooks(self):
+        names = ["Aster", "Briar"]
+        case = self._run_multi_sample(names, [])
+
+        self._assert_multi_char_conditioning(case, names, [None, None])
+        self.assertEqual(case["hook_calls"], [])
+        self.assertIs(case["selected"].call_args.args[1], case["input_model"])
+        self.assertIs(case["result"][1], case["input_model"])
+
+    def test_multi_char_passes_hooked_conditioning_to_stock_and_spectrum_modes(self):
+        for sampler_mode in ("KSampler", "FAST"):
+            with self.subTest(sampler_mode=sampler_mode):
+                case = self._run_multi_sample(
+                    ["North", "South"],
+                    [
+                        ("North", "test_north_lora.safetensors", 0.4),
+                        ("South", "test_south_lora.safetensors", 0.6),
+                    ],
+                    sampler_mode=sampler_mode,
+                )
+                self.assertEqual(case["selected"].call_args.args[0], sampler_mode)
+                self.assertIs(case["result"][1], case["input_model"])
+                self.assertEqual(len(_conditioning_records(case["selected"].call_args.args[7])), 3)
+
+    def test_disabled_multi_char_preserves_single_preset_global_lora_behavior(self):
+        node = FirstSampler()
+        input_model = object()
+        global_model = object()
+        sampled = object()
+        positive = [["BASE_POS", {"source": "base-positive"}]]
+        negative = [["BASE_NEG", {"source": "base-negative"}]]
+        selected = mock.Mock(return_value=(sampled,))
+        with (
+            mock.patch.object(node, "_apply_global_loras", return_value=global_model) as apply_global,
+            mock.patch.object(node, "_build_character_hooks", side_effect=AssertionError("single path must not build per-character hooks")),
+            mock.patch.object(MODULE, "_load_channel_masks", side_effect=AssertionError("single path must not load RGB masks"), create=True),
+            mock.patch.object(MODULE.comfy.hooks, "set_conds_props", side_effect=AssertionError("single path must keep conditioning unchanged")),
+            mock.patch.object(node, "_sample_selected", selected),
+        ):
+            result = node.sample(
+                model=input_model,
+                positive=positive,
+                negative=negative,
+                clip=None,
+                multi_char="",
+                seed=7,
+                latent_image={"samples": object()},
+                LORA_ACT="true",
+                LORA_DATA=_lora_data([("Hibiki", "test_single_lora.safetensors", 0.8)]),
+                mask_location="unused",
+                steps=28,
+                cfg=4.0,
+                sampler_name="euler",
+                scheduler="simple",
+                denoise=1.0,
+                split_mode="single",
+                spd_scale=0.5,
+                spd_sigma=0.7,
+                adaptive_smc_alpha=0.1,
+                sampler_mode="KSampler",
+            )
+
+        apply_global.assert_called_once()
+        self.assertIs(apply_global.call_args.args[0], input_model)
+        self.assertIs(selected.call_args.args[1], global_model)
+        self.assertIs(selected.call_args.args[7], positive)
+        self.assertIs(selected.call_args.args[8], negative)
+        self.assertEqual(result[0], sampled)
+        self.assertIs(result[1], global_model)
 
     def test_sampler_mode_is_optional_and_defaults_to_fast(self):
         input_types = FirstSampler.INPUT_TYPES()
