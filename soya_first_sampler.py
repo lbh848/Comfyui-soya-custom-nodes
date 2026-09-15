@@ -1,4 +1,4 @@
-"""Stock/Spectrum sampling with masked, per-character Anima LoRA hooks."""
+"""Stock/Spectrum sampling with shared-pass, spatially routed Anima LoRAs."""
 
 from __future__ import annotations
 
@@ -8,8 +8,6 @@ import os
 import traceback
 from collections import OrderedDict
 
-import comfy.hooks
-from .soya_character_lora import load_character_lora
 import comfy.samplers
 import comfy.sd
 import comfy.utils
@@ -393,8 +391,8 @@ class SoyaFirstSampler_mdsoya:
     CATEGORY = "sampling"
     DESCRIPTION = (
         "ANIMA_MODEL_WO_CHAR와 LORA_DATA를 받아 캐릭터 LoRA를 내부 적용합니다. "
-        "MULTI_CHAR=true이면 각 캐릭터의 LoRA와 프롬프트를 따로 계산하고 "
-        "RGB 마스크 영역별로 반영합니다. 배경에는 공통 모델만 사용합니다. sampler_mode에서 원본 "
+        "MULTI_CHAR=true이면 공통 모델 계산을 공유하고 각 캐릭터의 LoRA 추가분과 "
+        "프롬프트를 RGB 마스크 영역별로 반영합니다. 배경에는 공통 모델만 사용합니다. sampler_mode에서 원본 "
         "ComfyUI KSampler, Spectrum SPD/SPEED FAST sampler 또는 옵션형 "
         "Spectrum Mod Guidance sampler를 선택할 수 있습니다."
     )
@@ -447,42 +445,6 @@ class SoyaFirstSampler_mdsoya:
                 f"strength={entry['strength']}"
             )
         return current_model
-
-    def _build_character_hooks(self, model, entries, character_names):
-        registered_model = model
-        hooks_by_character = {name: None for name in character_names}
-        counts = {name: 0 for name in character_names}
-        for entry in entries:
-            name = entry["character"]
-            lora, resolved = self._load_lora(entry)
-            try:
-                registered_model, new_hooks = load_character_lora(
-                    registered_model,
-                    lora,
-                    entry["strength"],
-                )
-            except Exception as exc:
-                print(
-                    f"[1st sampler] Hook LoRA 등록 실패: char={name!r}, path={resolved}, "
-                    f"strength={entry['strength']}, error={exc}"
-                )
-                traceback.print_exc()
-                raise
-            current_hooks = hooks_by_character[name]
-            hooks_by_character[name] = (
-                new_hooks
-                if current_hooks is None
-                else current_hooks.clone_and_combine(new_hooks)
-            )
-            counts[name] += 1
-            print(
-                f"[1st sampler] 캐릭터 Hook LoRA 등록: char={name!r}, "
-                f"path={resolved}, strength={entry['strength']}"
-            )
-        for name in character_names:
-            if counts[name] == 0:
-                print(f"[1st sampler] 캐릭터에 적용할 Anima LoRA가 없습니다: char={name!r}")
-        return registered_model, [hooks_by_character[name] for name in character_names], counts
 
     @staticmethod
     def _sample_stock_padded(
@@ -757,12 +719,9 @@ class SoyaFirstSampler_mdsoya:
             )
             masks = _load_channel_masks(mask_location, payload["char_num"])
 
-            regional_model, character_hooks, lora_counts = self._build_character_hooks(
-                model, lora_entries, payload["char_name_list"]
-            )
-            regional_positive = []
-            regional_negative = []
+            lora_counts = {name: 0 for name in payload["char_name_list"]}
             region_prompts = []
+            spatial_conditionings = []
             for index in range(payload["char_num"]):
                 prompt_parts = (
                     payload["char_trigger_list"][index]
@@ -774,15 +733,7 @@ class SoyaFirstSampler_mdsoya:
                 prompt = ", ".join(part for part in prompt_parts if part)
                 tokens = clip.tokenize(prompt)
                 conditioning = clip.encode_from_tokens_scheduled(tokens)
-                positive_region, negative_region = comfy.hooks.set_conds_props(
-                    [conditioning, negative],
-                    strength=1.0,
-                    set_cond_area="default",
-                    mask=masks[index],
-                    hooks=character_hooks[index],
-                )
-                regional_positive.extend(positive_region)
-                regional_negative.extend(negative_region)
+                spatial_conditionings.append(conditioning)
                 region_prompts.append(prompt)
 
             background_parts = (
@@ -805,12 +756,28 @@ class SoyaFirstSampler_mdsoya:
             background_conditioning = clip.encode_from_tokens_scheduled(
                 clip.tokenize(background_prompt)
             )
-            regional_positive, regional_negative = comfy.hooks.set_default_conds_and_combine(
-                [regional_positive, regional_negative],
-                [background_conditioning, negative],
+            from .soya_spatial_lora import apply_spatial_loras
+
+            loaded = []
+            for entry in lora_entries:
+                lora, resolved = self._load_lora(entry)
+                name = entry["character"]
+                loaded.append((
+                    payload["char_name_list"].index(name), lora, entry["strength"],
+                ))
+                lora_counts[name] += 1
+                print(
+                    f"[1st sampler] 공간 LoRA 준비: char={name!r}, "
+                    f"path={resolved}, strength={entry['strength']}"
+                )
+            for name, count in lora_counts.items():
+                if count == 0:
+                    print(f"[1st sampler] 캐릭터에 적용할 Anima LoRA가 없습니다: char={name!r}; 영역 프롬프트만 적용")
+            regional_model = apply_spatial_loras(
+                model, loaded, masks, spatial_conditionings, background_conditioning,
             )
             print(
-                f"[1st sampler] MULTI_CHAR=true · 캐릭터별 Hook LoRA + RGB 마스크 합성 "
+                "[1st sampler] MULTI_CHAR=true · 공간 LoRA residual + 공유 모델 계산 "
                 f"+ {sampler_mode} 실행: "
                 f"order={payload['char_name_list']}, loras={lora_counts}, "
                 f"prompt_lengths={[len(p) for p in region_prompts]}, "
@@ -826,8 +793,8 @@ class SoyaFirstSampler_mdsoya:
                 cfg,
                 sampler_name,
                 scheduler,
-                regional_positive,
-                regional_negative,
+                background_conditioning,
+                negative,
                 clip,
                 latent_image,
                 denoise,

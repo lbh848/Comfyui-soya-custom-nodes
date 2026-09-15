@@ -1,4 +1,6 @@
+import ast
 import importlib.util
+import inspect
 import json
 import sys
 import types
@@ -23,9 +25,7 @@ def _load_module():
     comfy.sd = types.ModuleType("comfy.sd")
     comfy.utils = types.ModuleType("comfy.utils")
 
-    # The sampler's multi-character path attaches hooks and masks through this
-    # ComfyUI boundary.  The behavior is supplied per test so the assertions
-    # observe the conditioning that would reach a real sampler.
+    # Legacy conditioning hooks must not be used by either sampler path.
     comfy.hooks.set_conds_props = None
     comfy.hooks.set_default_conds_and_combine = None
 
@@ -39,8 +39,6 @@ def _load_module():
     regional = types.ModuleType(f"{PACKAGE_NAME}.anima_regional_conditioning")
     regional.AnimaConditioningRegionChain = object
     regional.ApplyAnimaRegionalConditioningPatch = object
-    character_lora = types.ModuleType(f"{PACKAGE_NAME}.soya_character_lora")
-    character_lora.load_character_lora = None
 
     modules = {
         PACKAGE_NAME: package,
@@ -51,7 +49,6 @@ def _load_module():
         "comfy.utils": comfy.utils,
         "folder_paths": folder_paths,
         f"{PACKAGE_NAME}.anima_regional_conditioning": regional,
-        f"{PACKAGE_NAME}.soya_character_lora": character_lora,
     }
     with mock.patch.dict(sys.modules, modules):
         spec = importlib.util.spec_from_file_location(MODULE_NAME, MODULE_PATH)
@@ -65,14 +62,6 @@ def _load_module():
 MODULE, SPECTRUM_CORE = _load_module()
 FirstSampler = MODULE.SoyaFirstSampler_mdsoya
 SpectrumOptions = MODULE.SoyaSpectrumModGuidanceOptions_mdsoya
-
-
-class _FakeHookGroup:
-    def __init__(self, labels):
-        self.labels = tuple(labels)
-
-    def clone_and_combine(self, other):
-        return _FakeHookGroup(self.labels + other.labels)
 
 
 class _FakeMask:
@@ -127,24 +116,6 @@ def _lora_data(entries):
     )
 
 
-def _conditioning_records(conditions):
-    return [
-        (entry[0], entry[1])
-        for entry in conditions
-        if isinstance(entry, (list, tuple))
-        and len(entry) >= 2
-        and isinstance(entry[1], dict)
-    ]
-
-
-def _records_for_mask(conditions, mask):
-    return [
-        (value, metadata)
-        for value, metadata in _conditioning_records(conditions)
-        if metadata.get("_test_mask") is mask
-    ]
-
-
 class FirstSamplerTests(unittest.TestCase):
     def _dispatch(self, node, sampler_mode, spectrum_options=None):
         return node._sample_selected(
@@ -169,291 +140,119 @@ class FirstSamplerTests(unittest.TestCase):
 
     def _run_multi_sample(self, names, entries, *, sampler_mode="KSampler"):
         node = FirstSampler()
-        input_model = object()
+        input_model, routed_model, sampled = object(), object(), object()
         clip = _FakeClip()
-        masks = [
-            _FakeMask("R"),
-            _FakeMask("G"),
-            _FakeMask("B"),
-        ][: len(names)]
-        hook_calls = []
-        registered_models = []
-        sampled = object()
-
-        def load_lora(entry):
-            filename = entry["lora_path"]
-            return {"test_filename": filename}, f"/test-only/{filename}"
-
-        def load_character_lora(current_model, lora, strength_model):
-            hook_calls.append(
-                (current_model, None, lora["test_filename"], strength_model, 0.0)
-            )
-            registered_model = object()
-            registered_models.append(registered_model)
-            hooks = _FakeHookGroup([(lora["test_filename"], strength_model)])
-            return registered_model, hooks
-
-        def set_conds_props(
-            conds,
-            strength=1.0,
-            set_cond_area="default",
-            mask=None,
-            hooks=None,
-            timesteps_range=None,
-            append_hooks=True,
-        ):
-            result = []
-            for conditioning in conds:
-                copied = []
-                for value, metadata in conditioning:
-                    metadata = dict(metadata)
-                    metadata.update(
-                        {
-                            "_test_hooks": hooks,
-                            "_test_mask": mask,
-                            "_test_area": set_cond_area,
-                        }
-                    )
-                    copied.append([value, metadata])
-                result.append(copied)
-            return result
-
-        def set_default_conds_and_combine(conds, new_conds, hooks=None, timesteps_range=None):
-            result = []
-            for conditioning, default_conditioning in zip(conds, new_conds):
-                copied_default = []
-                for value, metadata in default_conditioning:
-                    metadata = dict(metadata)
-                    metadata.update(
-                        {
-                            "default": True,
-                            "_test_hooks": hooks,
-                            "_test_mask": None,
-                            "_test_area": "default",
-                        }
-                    )
-                    copied_default.append([value, metadata])
-                result.append(list(conditioning) + copied_default)
-            return result
-
+        masks = [_FakeMask(channel) for channel in "RGB"[:len(names)]]
+        negative = [["BASE_NEG", {"source": "base-negative"}]]
+        spatial = types.ModuleType(f"{PACKAGE_NAME}.soya_spatial_lora")
+        spatial.apply_spatial_loras = mock.Mock(return_value=routed_model)
         selected = mock.Mock(return_value=(sampled,))
-        multi_char = _multi_char_payload(names)
         with (
-            mock.patch.object(node, "_load_lora", side_effect=load_lora),
-            mock.patch.object(
-                MODULE,
-                "load_character_lora",
-                side_effect=load_character_lora,
-            ),
-            mock.patch.object(MODULE.comfy.hooks, "set_conds_props", side_effect=set_conds_props),
-            mock.patch.object(
-                MODULE.comfy.hooks,
-                "set_default_conds_and_combine",
-                side_effect=set_default_conds_and_combine,
-            ),
-            mock.patch.object(
-                node,
-                "_apply_global_loras",
-                side_effect=AssertionError("multi-character sampling must not stack character LoRAs globally"),
-            ),
-            mock.patch.object(
-                MODULE,
-                "ApplyAnimaRegionalConditioningPatch",
-                side_effect=AssertionError("multi-character sampling must not use regional patching"),
-                create=True,
-            ),
-            mock.patch.object(
-                MODULE,
-                "AnimaConditioningRegionChain",
-                side_effect=AssertionError("multi-character sampling must not build regional chains"),
-                create=True,
-            ),
+            mock.patch.dict(sys.modules, {spatial.__name__: spatial}),
+            mock.patch.object(node, "_load_lora", side_effect=lambda entry: (
+                {"test_filename": entry["lora_path"]}, f"/test-only/{entry['lora_path']}",
+            )) as load_lora,
+            mock.patch.object(node, "_apply_global_loras", side_effect=AssertionError(
+                "multi-character sampling must not stack character LoRAs globally")),
+            mock.patch.object(MODULE.comfy.hooks, "set_conds_props", side_effect=AssertionError(
+                "multi-character sampling must not create per-character prediction branches")),
+            mock.patch.object(MODULE.comfy.hooks, "set_default_conds_and_combine", side_effect=AssertionError(
+                "multi-character sampling must share the model forward")),
             mock.patch.object(MODULE, "_load_channel_masks", return_value=masks) as load_masks,
             mock.patch.object(node, "_sample_selected", selected),
         ):
             result = node.sample(
-                model=input_model,
-                positive=[["BASE_POS", {"source": "base-positive"}]],
-                negative=[["BASE_NEG", {"source": "base-negative"}]],
-                clip=clip,
-                multi_char=multi_char,
-                seed=7,
-                latent_image={"samples": object()},
-                LORA_ACT="true",
-                LORA_DATA=_lora_data(entries),
-                mask_location="test-only-masks",
-                steps=28,
-                cfg=4.0,
-                sampler_name="euler",
-                scheduler="simple",
-                denoise=1.0,
-                split_mode="single",
-                spd_scale=0.5,
-                spd_sigma=0.7,
-                adaptive_smc_alpha=0.1,
+                model=input_model, positive=[["BASE_POS", {}]], negative=negative, clip=clip,
+                multi_char=_multi_char_payload(names), seed=7, latent_image={"samples": object()},
+                LORA_ACT="true", LORA_DATA=_lora_data(entries), mask_location="test-only-masks",
+                steps=28, cfg=4.0, sampler_name="euler", scheduler="simple", denoise=1.0,
+                split_mode="single", spd_scale=0.5, spd_sigma=0.7, adaptive_smc_alpha=0.1,
                 sampler_mode=sampler_mode,
             )
-
+        load_masks.assert_called_once_with("test-only-masks", len(names))
+        self.assertEqual(load_lora.call_count, len(entries))
+        spatial.apply_spatial_loras.assert_called_once()
+        selected.assert_called_once()
+        self.assertIs(selected.call_args.args[1], routed_model)
+        self.assertEqual(result, (sampled, input_model))
         return {
-            "node": node,
-            "input_model": input_model,
-            "clip": clip,
-            "masks": masks,
-            "hook_calls": hook_calls,
-            "registered_models": registered_models,
-            "selected": selected,
-            "result": result,
+            "input_model": input_model, "clip": clip, "masks": masks,
+            "spatial": spatial.apply_spatial_loras, "selected": selected, "negative": negative,
         }
 
-    def _assert_multi_char_conditioning(self, case, names, expected_labels):
-        selected_call = case["selected"].call_args
-        positive = selected_call.args[7]
-        negative = selected_call.args[8]
-
-        self.assertEqual(len(_conditioning_records(positive)), len(names) + 1)
-        self.assertEqual(len(_conditioning_records(negative)), len(names) + 1)
-
+    def _assert_multi_char_conditioning(self, case, names, entries):
+        model, loaded, masks, regions, background = case["spatial"].call_args.args
+        self.assertIs(model, case["input_model"])
+        self.assertIs(masks, case["masks"])
+        self.assertEqual(loaded, [
+            (names.index(name), {"test_filename": path}, strength)
+            for name, path, strength in entries
+        ])
+        self.assertEqual(len(regions), len(names))
         for index, name in enumerate(names):
             with self.subTest(character=name):
-                positive_records = _records_for_mask(positive, case["masks"][index])
-                negative_records = _records_for_mask(negative, case["masks"][index])
-                self.assertEqual(len(positive_records), 1)
-                self.assertEqual(len(negative_records), 1)
-
-                positive_value, positive_metadata = positive_records[0]
-                _negative_value, negative_metadata = negative_records[0]
-                positive_hooks = positive_metadata["_test_hooks"]
-                negative_hooks = negative_metadata["_test_hooks"]
-                labels = expected_labels[index]
-                if labels is None:
-                    self.assertIsNone(positive_hooks)
-                else:
-                    self.assertEqual(positive_hooks.labels, labels)
-                self.assertIs(negative_hooks, positive_hooks)
-                self.assertIs(positive_metadata["_test_mask"], case["masks"][index])
-                self.assertIs(negative_metadata["_test_mask"], case["masks"][index])
-                self.assertEqual(positive_metadata["_test_area"], "default")
-                self.assertEqual(negative_metadata["_test_area"], "default")
-
-                # Each region receives its own prompt context.  Checking every
-                # other profile catches accidental prompt concatenation between
-                # characters even when masks and hooks look correct.
-                self.assertIn(f"{name} profile", str(positive_value))
-                for other_name in names:
-                    if other_name != name:
-                        self.assertNotIn(f"{other_name} profile", str(positive_value))
-
-        background_positive = _records_for_mask(positive, None)
-        background_negative = _records_for_mask(negative, None)
-        self.assertEqual(len(background_positive), 1)
-        self.assertEqual(len(background_negative), 1)
-        self.assertIsNone(background_positive[0][1]["_test_hooks"])
-        self.assertIsNone(background_negative[0][1]["_test_hooks"])
-        self.assertIsNone(background_positive[0][1]["_test_mask"])
-        self.assertIsNone(background_negative[0][1]["_test_mask"])
-        self.assertEqual(background_positive[0][1]["_test_area"], "default")
-        self.assertEqual(background_negative[0][1]["_test_area"], "default")
-
-    def test_multi_char_hibiki_hoshino_uses_one_hook_and_mask_per_character(self):
-        case = self._run_multi_sample(
-            ["Hibiki", "Hoshino"],
-            [
-                ("Hibiki", "test_hibiki_lora.safetensors", 0.8),
-                ("Hoshino", "test_hoshino_lora.safetensors", 0.9),
-            ],
-        )
-        self.assertEqual(case["selected"].call_args.args[0], "KSampler")
-        self.assertIs(case["selected"].call_args.args[1], case["registered_models"][-1])
-        self.assertEqual(case["result"][0], case["selected"].return_value[0])
-        self.assertIs(case["result"][1], case["input_model"])
-        self.assertEqual(case["clip"].prompts.count(""), 0)
-        self._assert_multi_char_conditioning(
-            case,
-            ["Hibiki", "Hoshino"],
-            [
-                (("test_hibiki_lora.safetensors", 0.8),),
-                (("test_hoshino_lora.safetensors", 0.9),),
-            ],
-        )
-
-        self.assertEqual(
-            [(path, strength) for _model, _clip, path, strength, _clip_strength in case["hook_calls"]],
-            [
-                ("test_hibiki_lora.safetensors", 0.8),
-                ("test_hoshino_lora.safetensors", 0.9),
-            ],
-        )
+                self.assertEqual(len(regions[index]), 1)
+                prompt = regions[index][0][0]
+                self.assertIn(f"{name} profile", prompt)
+                self.assertIn(f"{name} trigger", prompt)
+                for shared in ("shared before", "shared after", "two subjects in a clear composition"):
+                    self.assertIn(shared, prompt)
+                for other in names:
+                    if other != name:
+                        self.assertNotIn(f"{other} profile", prompt)
+                        self.assertNotIn(f"{other} trigger", prompt)
+        self.assertEqual(len(background), 1)
+        self.assertIn("shared background", background[0][0])
+        self.assertIn("background trigger", background[0][0])
+        for name in names:
+            self.assertNotIn(f"{name} profile", background[0][0])
+            self.assertNotIn(f"{name} trigger", background[0][0])
+        # A single shared CFG pair reaches all three sampler modes; masks and
+        # per-character prompt/adapter ownership live on the routed model.
+        self.assertIs(case["selected"].call_args.args[7], background)
+        self.assertIs(case["selected"].call_args.args[8], case["negative"])
         self.assertIs(case["selected"].call_args.args[9], case["clip"])
-        self.assertTrue(any("Hibiki profile" in prompt for prompt in case["clip"].prompts))
-        self.assertTrue(any("Hoshino profile" in prompt for prompt in case["clip"].prompts))
 
-    def test_multi_char_matches_hooks_by_name_when_order_and_lora_count_differ(self):
-        case = self._run_multi_sample(
-            ["Hoshino", "Hibiki"],
-            [
-                ("Hibiki", "test_hibiki_face.safetensors", 0.8),
-                ("Hibiki", "test_hibiki_style.safetensors", 0.2),
-                ("Hoshino", "test_hoshino_lora.safetensors", 0.9),
-            ],
-            sampler_mode="FAST",
-        )
-        self.assertEqual(case["selected"].call_args.args[0], "FAST")
-        self._assert_multi_char_conditioning(
-            case,
-            ["Hoshino", "Hibiki"],
-            [
-                (("test_hoshino_lora.safetensors", 0.9),),
-                (
-                    ("test_hibiki_face.safetensors", 0.8),
-                    ("test_hibiki_style.safetensors", 0.2),
-                ),
-            ],
-        )
-        self.assertEqual(
-            [call[2:] for call in case["hook_calls"]],
-            [
-                ("test_hibiki_face.safetensors", 0.8, 0.0),
-                ("test_hibiki_style.safetensors", 0.2, 0.0),
-                ("test_hoshino_lora.safetensors", 0.9, 0.0),
-            ],
-        )
+    def test_multi_char_hibiki_hoshino_routes_loras_and_prompts_per_character(self):
+        names = ["Hibiki", "Hoshino"]
+        entries = [
+            ("Hibiki", "test_hibiki_lora.safetensors", 0.8),
+            ("Hoshino", "test_hoshino_lora.safetensors", 0.9),
+        ]
+        case = self._run_multi_sample(names, entries)
+        self.assertEqual(case["selected"].call_args.args[0], "KSampler")
+        self._assert_multi_char_conditioning(case, names, entries)
+
+    def test_multi_char_matches_by_name_when_order_and_lora_count_differ(self):
+        names = ["Hoshino", "Hibiki"]
+        entries = [
+            ("Hibiki", "test_hibiki_face.safetensors", 0.8),
+            ("Hibiki", "test_hibiki_style.safetensors", 0.2),
+            ("Hoshino", "test_hoshino_lora.safetensors", 0.9),
+        ]
+        case = self._run_multi_sample(names, entries, sampler_mode="FAST")
+        self._assert_multi_char_conditioning(case, names, entries)
 
     def test_multi_char_keeps_masked_prompt_when_one_character_has_no_lora(self):
-        case = self._run_multi_sample(
-            ["Mina", "Niko"],
-            [("Mina", "test_mina_lora.safetensors", 0.65)],
-        )
-        self._assert_multi_char_conditioning(
-            case,
-            ["Mina", "Niko"],
-            [(("test_mina_lora.safetensors", 0.65),), None],
-        )
+        names = ["Mina", "Niko"]
+        entries = [("Mina", "test_mina_lora.safetensors", 0.65)]
+        self._assert_multi_char_conditioning(self._run_multi_sample(names, entries), names, entries)
 
-        self.assertEqual(len(case["hook_calls"]), 1)
-
-    def test_multi_char_with_no_loras_keeps_all_regions_masked_without_hooks(self):
+    def test_multi_char_with_no_loras_still_routes_all_prompts(self):
         names = ["Aster", "Briar"]
-        case = self._run_multi_sample(names, [])
+        self._assert_multi_char_conditioning(self._run_multi_sample(names, []), names, [])
 
-        self._assert_multi_char_conditioning(case, names, [None, None])
-        self.assertEqual(case["hook_calls"], [])
-        self.assertIs(case["selected"].call_args.args[1], case["input_model"])
-        self.assertIs(case["result"][1], case["input_model"])
-
-    def test_multi_char_passes_hooked_conditioning_to_stock_and_spectrum_modes(self):
-        for sampler_mode in ("KSampler", "FAST"):
-            with self.subTest(sampler_mode=sampler_mode):
-                case = self._run_multi_sample(
-                    ["North", "South"],
-                    [
-                        ("North", "test_north_lora.safetensors", 0.4),
-                        ("South", "test_south_lora.safetensors", 0.6),
-                    ],
-                    sampler_mode=sampler_mode,
-                )
-                self.assertEqual(case["selected"].call_args.args[0], sampler_mode)
-                self.assertIs(case["result"][1], case["input_model"])
-                self.assertEqual(len(_conditioning_records(case["selected"].call_args.args[7])), 3)
+    def test_multi_char_passes_shared_conditioning_to_all_sampler_modes(self):
+        names = ["North", "South"]
+        entries = [
+            ("North", "test_north_lora.safetensors", 0.4),
+            ("South", "test_south_lora.safetensors", 0.6),
+        ]
+        for mode in ("KSampler", "FAST", "SpectrumKSamplerModGuidance"):
+            with self.subTest(sampler_mode=mode):
+                case = self._run_multi_sample(names, entries, sampler_mode=mode)
+                self.assertEqual(case["selected"].call_args.args[0], mode)
+                self._assert_multi_char_conditioning(case, names, entries)
 
     def test_disabled_multi_char_preserves_single_preset_global_lora_behavior(self):
         node = FirstSampler()
@@ -463,9 +262,11 @@ class FirstSamplerTests(unittest.TestCase):
         positive = [["BASE_POS", {"source": "base-positive"}]]
         negative = [["BASE_NEG", {"source": "base-negative"}]]
         selected = mock.Mock(return_value=(sampled,))
+        spatial = types.ModuleType(f"{PACKAGE_NAME}.soya_spatial_lora")
+        spatial.apply_spatial_loras = mock.Mock(side_effect=AssertionError("single path must not apply spatial routing"))
         with (
+            mock.patch.dict(sys.modules, {spatial.__name__: spatial}),
             mock.patch.object(node, "_apply_global_loras", return_value=global_model) as apply_global,
-            mock.patch.object(node, "_build_character_hooks", side_effect=AssertionError("single path must not build per-character hooks")),
             mock.patch.object(MODULE, "_load_channel_masks", side_effect=AssertionError("single path must not load RGB masks"), create=True),
             mock.patch.object(MODULE.comfy.hooks, "set_conds_props", side_effect=AssertionError("single path must keep conditioning unchanged")),
             mock.patch.object(node, "_sample_selected", selected),
@@ -818,6 +619,79 @@ class FirstSamplerTests(unittest.TestCase):
     def test_unknown_sampler_mode_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "지원하지 않는 sampler_mode"):
             self._dispatch(FirstSampler(), "unknown")
+
+    def test_existing_node_contract_is_preserved_without_a_separate_spatial_node(self):
+        required = (
+            "model", "positive", "negative", "clip", "multi_char", "seed", "latent_image",
+            "LORA_ACT", "LORA_DATA", "mask_location", "steps", "cfg", "sampler_name",
+            "scheduler", "denoise", "split_mode", "spd_scale", "spd_sigma", "adaptive_smc_alpha",
+        )
+        optional = ("sampler_mode", "spectrum_options")
+        self.assertEqual(tuple(FirstSampler.INPUT_TYPES()["required"]), required)
+        self.assertEqual(tuple(FirstSampler.INPUT_TYPES()["optional"]), optional)
+        self.assertEqual(tuple(inspect.signature(FirstSampler.sample).parameters), ("self",) + required + optional)
+        self.assertEqual(FirstSampler.RETURN_TYPES, ("LATENT", "MODEL"))
+        self.assertEqual(FirstSampler.RETURN_NAMES, ("output", "model"))
+        self.assertEqual(FirstSampler.FUNCTION, "sample")
+        self.assertEqual(FirstSampler.CATEGORY, "sampling")
+        self.assertFalse(hasattr(MODULE, "SoyaFirstSamplerSpatialLoRA_mdsoya"))
+        tree = ast.parse((MODULE_PATH.parent / "__init__.py").read_text(encoding="utf-8"))
+        mappings = {
+            target.id: node.value
+            for node in tree.body if isinstance(node, ast.Assign)
+            for target in node.targets if isinstance(target, ast.Name)
+        }
+        classes = mappings["NODE_CLASS_MAPPINGS"]
+        displays = mappings["NODE_DISPLAY_NAME_MAPPINGS"]
+        sampler_classes = {
+            key.value: value.id for key, value in zip(classes.keys, classes.values)
+            if "FirstSampler" in key.value
+        }
+        self.assertEqual(sampler_classes, {"SoyaFirstSampler_mdsoya": "SoyaFirstSampler_mdsoya"})
+        sampler_displays = {
+            key.value: value.value for key, value in zip(displays.keys, displays.values)
+            if "FirstSampler" in key.value
+        }
+        self.assertEqual(sampler_displays, {"SoyaFirstSampler_mdsoya": "1st sampler"})
+
+    def test_spatial_sampler_routes_by_slot_without_hook_or_global_merge(self):
+        spatial = types.ModuleType(f"{PACKAGE_NAME}.soya_spatial_lora")
+        for names in (("Hibiki", "Hoshino"), ("Aster", "Briar"), ("North", "South", "West")):
+            with self.subTest(names=names):
+                node = FirstSampler()
+                model, patched, sampled = object(), object(), object()
+                spatial.apply_spatial_loras = mock.Mock(return_value=patched)
+                masks = [_FakeMask(i) for i in range(len(names))]
+                clip = _FakeClip()
+                entries = [(name, f"test_{i}.safetensors", .4 + i * .1) for i, name in reversed(list(enumerate(names)))]
+                # Two adapters on one character and a different file order
+                # must not change the relationship to the mask and prompt.
+                entries.append((names[0], "test_extra.safetensors", -.2))
+                with (
+                    mock.patch.dict(sys.modules, {spatial.__name__: spatial}),
+                    mock.patch.object(node, "_load_lora", side_effect=lambda entry: (entry["lora_path"], entry["lora_path"])),
+                    mock.patch.object(node, "_apply_global_loras", side_effect=AssertionError("shared path must not merge character weights")),
+                    mock.patch.object(MODULE, "_load_channel_masks", return_value=masks),
+                    mock.patch.object(node, "_sample_selected", return_value=(sampled,)) as selected,
+                ):
+                    result = node.sample(
+                        model=model, positive=[["base", {}]], negative=[["negative", {}]], clip=clip,
+                        multi_char=_multi_char_payload(names), seed=7, latent_image={"samples": object()},
+                        LORA_ACT="true", LORA_DATA=_lora_data(entries), mask_location="test-only", steps=30,
+                        cfg=5, sampler_name="euler", scheduler="simple", denoise=1., split_mode="single",
+                        spd_scale=.5, spd_sigma=.7, adaptive_smc_alpha=0., sampler_mode="KSampler",
+                    )
+                applied = spatial.apply_spatial_loras.call_args.args
+                self.assertIs(applied[0], model)
+                self.assertEqual(applied[1], [(names.index(name), path, strength) for name, path, strength in entries])
+                self.assertIs(applied[2], masks)
+                for index, name in enumerate(names):
+                    self.assertIn(f"{name} profile", applied[3][index][0][0])
+                self.assertIs(selected.call_args.args[1], patched)
+                self.assertEqual(len(selected.call_args.args[7]), 1)
+                self.assertEqual(len(selected.call_args.args[8]), 1)
+                self.assertIs(result[0], sampled)
+                self.assertIs(result[1], model)
 
 
 if __name__ == "__main__":
