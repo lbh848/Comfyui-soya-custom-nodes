@@ -28,6 +28,13 @@ from .soya_seg_model_provider import SoyaSegModelProvider_mdsoya
 from .soya_faceid_model_switch import SoyaFaceIDModelSwitch_mdsoya
 from .soya_passthrough import SoyaPassthrough_mdsoya
 from .soya_model_patcher_refresh import SoyaModelPatcherRefresh_mdsoya
+from .soya_image_diagnostic import (
+    SoyaDiagnosticConditioningProbe_mdsoya,
+    SoyaDiagnosticImageProbe_mdsoya,
+    SoyaDiagnosticLatentProbe_mdsoya,
+    SoyaDiagnosticModelProbe_mdsoya,
+    SoyaDiagnosticStableModelReuse_mdsoya,
+)
 from .soya_ipadapter_patch_cleaner import SoyaIPAdapterPatchCleaner_mdsoya
 from .soya_hiresfix_toggle import SoyaHiresfixToggle_mdsoya
 from .soya_upscale_toggle import SoyaUpscaleToggle_mdsoya
@@ -114,6 +121,11 @@ NODE_CLASS_MAPPINGS = {
     "SoyaFaceIDModelSwitch_mdsoya": SoyaFaceIDModelSwitch_mdsoya,
     "SoyaPassthrough_mdsoya": SoyaPassthrough_mdsoya,
     "SoyaModelPatcherRefresh_mdsoya": SoyaModelPatcherRefresh_mdsoya,
+    "SoyaDiagnosticStableModelReuse_mdsoya": SoyaDiagnosticStableModelReuse_mdsoya,
+    "SoyaDiagnosticModelProbe_mdsoya": SoyaDiagnosticModelProbe_mdsoya,
+    "SoyaDiagnosticConditioningProbe_mdsoya": SoyaDiagnosticConditioningProbe_mdsoya,
+    "SoyaDiagnosticLatentProbe_mdsoya": SoyaDiagnosticLatentProbe_mdsoya,
+    "SoyaDiagnosticImageProbe_mdsoya": SoyaDiagnosticImageProbe_mdsoya,
     "SoyaIPAdapterPatchCleaner_mdsoya": SoyaIPAdapterPatchCleaner_mdsoya,
     "SoyaHiresfixToggle_mdsoya": SoyaHiresfixToggle_mdsoya,
     "SoyaUpscaleToggle_mdsoya": SoyaUpscaleToggle_mdsoya,
@@ -199,6 +211,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaFaceIDModelSwitch_mdsoya": "Soya FaceID Model Switch (Soya)",
     "SoyaPassthrough_mdsoya": "Passthrough (Soya)",
     "SoyaModelPatcherRefresh_mdsoya": "ModelPatcher Refresh (Soya)",
+    "SoyaDiagnosticStableModelReuse_mdsoya": "Diagnostic Stable Model Reuse (Soya)",
+    "SoyaDiagnosticModelProbe_mdsoya": "Diagnostic Model Probe (Soya)",
+    "SoyaDiagnosticConditioningProbe_mdsoya": "Diagnostic Conditioning Probe (Soya)",
+    "SoyaDiagnosticLatentProbe_mdsoya": "Diagnostic Latent Probe (Soya)",
+    "SoyaDiagnosticImageProbe_mdsoya": "Diagnostic Image Probe (Soya)",
     "SoyaIPAdapterPatchCleaner_mdsoya": "IPAdapter Patch Cleaner (Soya)",
     "SoyaHiresfixToggle_mdsoya": "Hiresfix Toggle (Soya)",
     "SoyaUpscaleToggle_mdsoya": "Upscale Toggle (Soya)",
