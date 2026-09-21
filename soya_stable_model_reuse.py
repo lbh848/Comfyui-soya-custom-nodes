@@ -33,6 +33,7 @@ _MAX_SIGNATURE_DEPTH = 10
 @dataclass
 class _CachedModel:
     signature: str
+    components: dict[str, str]
     model: Any
 
 
@@ -193,37 +194,97 @@ def _update_signature(
     _hash_token(hasher, f"type:{type(value).__module__}.{type(value).__qualname__}")
 
 
+def model_reuse_fingerprint(
+    model: Any,
+    configuration_a: Any = "",
+    configuration_b: Any = "",
+) -> tuple[str, dict[str, str]]:
+    """Fingerprint the effective patch stack and its observable components.
+
+    The main hash is intentionally fed in the same order and with the same
+    values as the original v1 signature. Component hashes are calculated in
+    parallel and are diagnostic only; they never participate in cache choice.
+    """
+    base_model = getattr(model, "model", None)
+    hasher = hashlib.sha256()
+    components: dict[str, str] = {}
+    _hash_token(hasher, "soya-stable-model-reuse-v1")
+
+    class _TeeHasher:
+        def __init__(self, *targets):
+            self.targets = targets
+
+        def update(self, payload: bytes) -> None:
+            for target in self.targets:
+                target.update(payload)
+
+    def add_token_component(name: str, token: Any) -> None:
+        component_hasher = hashlib.sha256()
+        _hash_token(_TeeHasher(hasher, component_hasher), token)
+        components[name] = component_hasher.hexdigest()
+
+    def add_value_component(name: str, value: Any) -> None:
+        component_hasher = hashlib.sha256()
+        _update_signature(_TeeHasher(hasher, component_hasher), value)
+        components[name] = component_hasher.hexdigest()
+
+    add_token_component("base_object", f"base_object:{id(base_model)}")
+    add_token_component(
+        "clone_base_uuid",
+        f"clone_base_uuid:{getattr(model, 'clone_base_uuid', None)}",
+    )
+    add_token_component(
+        "load_device",
+        f"load_device:{getattr(model, 'load_device', None)}",
+    )
+    add_token_component(
+        "offload_device",
+        f"offload_device:{getattr(model, 'offload_device', None)}",
+    )
+    add_token_component(
+        "weight_inplace_update",
+        f"weight_inplace_update:{getattr(model, 'weight_inplace_update', None)}",
+    )
+    add_value_component("patches", getattr(model, "patches", {}) or {})
+    add_value_component("model_options", getattr(model, "model_options", {}) or {})
+    add_value_component("object_patches", getattr(model, "object_patches", {}) or {})
+    add_value_component(
+        "weight_wrapper_patches",
+        getattr(model, "weight_wrapper_patches", {}) or {},
+    )
+    add_value_component("wrappers", getattr(model, "wrappers", {}) or {})
+    add_value_component("callbacks", getattr(model, "callbacks", {}) or {})
+    add_value_component("injections", getattr(model, "injections", {}) or {})
+    add_value_component("attachments", getattr(model, "attachments", {}) or {})
+    additional_models = getattr(model, "additional_models", {}) or {}
+    additional_identity = {
+        str(key): [str(getattr(item, "clone_base_uuid", None)) for item in items]
+        for key, items in additional_models.items()
+    }
+    add_value_component("additional_models", additional_identity)
+    add_token_component(
+        "configuration_a",
+        _canonical_configuration(configuration_a),
+    )
+    add_token_component(
+        "configuration_b",
+        _canonical_configuration(configuration_b),
+    )
+    return hasher.hexdigest(), components
+
+
 def model_reuse_signature(
     model: Any,
     configuration_a: Any = "",
     configuration_b: Any = "",
 ) -> str:
     """Fingerprint the effective patch stack without using ``patches_uuid``."""
-    base_model = getattr(model, "model", None)
-    hasher = hashlib.sha256()
-    _hash_token(hasher, "soya-stable-model-reuse-v1")
-    _hash_token(hasher, f"base_object:{id(base_model)}")
-    _hash_token(hasher, f"clone_base_uuid:{getattr(model, 'clone_base_uuid', None)}")
-    _hash_token(hasher, f"load_device:{getattr(model, 'load_device', None)}")
-    _hash_token(hasher, f"offload_device:{getattr(model, 'offload_device', None)}")
-    _hash_token(hasher, f"weight_inplace_update:{getattr(model, 'weight_inplace_update', None)}")
-    _update_signature(hasher, getattr(model, "patches", {}) or {})
-    _update_signature(hasher, getattr(model, "model_options", {}) or {})
-    _update_signature(hasher, getattr(model, "object_patches", {}) or {})
-    _update_signature(hasher, getattr(model, "weight_wrapper_patches", {}) or {})
-    _update_signature(hasher, getattr(model, "wrappers", {}) or {})
-    _update_signature(hasher, getattr(model, "callbacks", {}) or {})
-    _update_signature(hasher, getattr(model, "injections", {}) or {})
-    _update_signature(hasher, getattr(model, "attachments", {}) or {})
-    additional_models = getattr(model, "additional_models", {}) or {}
-    additional_identity = {
-        str(key): [str(getattr(item, "clone_base_uuid", None)) for item in items]
-        for key, items in additional_models.items()
-    }
-    _update_signature(hasher, additional_identity)
-    _hash_token(hasher, _canonical_configuration(configuration_a))
-    _hash_token(hasher, _canonical_configuration(configuration_b))
-    return hasher.hexdigest()
+    signature, _components = model_reuse_fingerprint(
+        model,
+        configuration_a,
+        configuration_b,
+    )
+    return signature
 
 
 def clear_stable_model_reuse_cache() -> None:
@@ -262,7 +323,7 @@ class SoyaStableModelPatcherReuse_mdsoya:
             print(f"{_LOG_PREFIX} reuse failed: scope={scope!r}, error={error}")
             raise error
         try:
-            signature = model_reuse_signature(
+            signature, components = model_reuse_fingerprint(
                 model,
                 configuration_a,
                 configuration_b,
@@ -276,13 +337,40 @@ class SoyaStableModelPatcherReuse_mdsoya:
                 else:
                     chosen = model
                     cache_state = "miss" if cached is None else "replace"
-                    _MODEL_CACHE[scope] = _CachedModel(signature, model)
+                    _MODEL_CACHE[scope] = _CachedModel(signature, components, model)
+                previous_signature = cached.signature if cached is not None else ""
+                changed_components = (
+                    [
+                        name
+                        for name, digest in components.items()
+                        if cached.components.get(name) != digest
+                    ]
+                    if cached is not None
+                    else []
+                )
+            chosen_uuid = str(getattr(chosen, "patches_uuid", None))
+            trace = {
+                "schema_version": 1,
+                "scope": scope,
+                "cache_state": cache_state,
+                "signature": signature,
+                "previous_signature": previous_signature,
+                "incoming_patches_uuid": incoming_uuid,
+                "chosen_patches_uuid": chosen_uuid,
+                "incoming_is_chosen": chosen is model,
+                "changed_components": changed_components,
+                "components": components,
+            }
             print(
                 f"{_LOG_PREFIX} scope={scope!r}, cache={cache_state}, "
                 f"signature={signature[:16]}, incoming_uuid={incoming_uuid}, "
-                f"chosen_uuid={getattr(chosen, 'patches_uuid', None)}"
+                f"chosen_uuid={chosen_uuid}, "
+                f"changed_components={changed_components or ['none']}"
             )
-            return (chosen,)
+            return {
+                "ui": {"stable_model_reuse": [trace]},
+                "result": (chosen,),
+            }
         except Exception as exc:
             print(
                 f"{_LOG_PREFIX} reuse failed: scope={scope!r}, "
