@@ -269,7 +269,6 @@ def _tensor_metadata(value: torch.Tensor) -> dict[str, Any]:
         "dtype": str(detached.dtype),
         "device": str(detached.device),
         "numel": int(detached.numel()),
-        "version": int(getattr(detached, "_version", 0)),
     }
     try:
         result["data_ptr"] = int(detached.data_ptr())
@@ -694,7 +693,6 @@ def _tensor_sample(tensor: torch.Tensor) -> dict[str, Any]:
         "device": str(value.device),
         "numel": int(value.numel()),
         "tensor_id": storage.get("tensor_id"),
-        "version": storage.get("version"),
         "data_ptr": storage.get("data_ptr"),
         "storage_data_ptr": storage.get("storage_data_ptr"),
         "storage_bytes": storage.get("storage_bytes"),
