@@ -138,6 +138,38 @@ class FirstSamplerTests(unittest.TestCase):
             spectrum_options,
         )
 
+    def test_global_character_model_reuses_same_patcher_until_configuration_changes(self):
+        node = FirstSampler()
+        base_model = types.SimpleNamespace(
+            clone_base_uuid="base",
+            patches_uuid="base-patches",
+        )
+        entries = [{"lora_path": "character.safetensors", "strength": 0.8}]
+        first_patched = object()
+        changed_patched = object()
+        stat = types.SimpleNamespace(st_mtime_ns=10, st_size=20)
+
+        with (
+            mock.patch.object(MODULE, "_resolve_lora_path", return_value="character.safetensors"),
+            mock.patch.object(MODULE.os, "stat", return_value=stat),
+            mock.patch.object(node, "_load_lora", return_value=("lora", "character.safetensors")),
+            mock.patch.object(
+                MODULE.comfy.sd,
+                "load_lora_for_models",
+                side_effect=[(first_patched, None), (changed_patched, None)],
+            ) as load_lora,
+        ):
+            self.assertIs(node._apply_global_loras(base_model, entries), first_patched)
+            self.assertIs(node._apply_global_loras(base_model, entries), first_patched)
+            self.assertEqual(load_lora.call_count, 1)
+
+            changed_entries = [{"lora_path": "character.safetensors", "strength": 0.9}]
+            self.assertIs(
+                node._apply_global_loras(base_model, changed_entries),
+                changed_patched,
+            )
+            self.assertEqual(load_lora.call_count, 2)
+
     def _run_multi_sample(self, names, entries, *, sampler_mode="KSampler"):
         node = FirstSampler()
         input_model, routed_model, sampled = object(), object(), object()

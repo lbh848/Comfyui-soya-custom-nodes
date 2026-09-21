@@ -28,6 +28,7 @@ from .soya_seg_model_provider import SoyaSegModelProvider_mdsoya
 from .soya_faceid_model_switch import SoyaFaceIDModelSwitch_mdsoya
 from .soya_passthrough import SoyaPassthrough_mdsoya
 from .soya_model_patcher_refresh import SoyaModelPatcherRefresh_mdsoya
+from .soya_stable_model_reuse import SoyaStableModelPatcherReuse_mdsoya
 from .soya_image_diagnostic import (
     SoyaDiagnosticConditioningProbe_mdsoya,
     SoyaDiagnosticImageProbe_mdsoya,
@@ -121,6 +122,7 @@ NODE_CLASS_MAPPINGS = {
     "SoyaFaceIDModelSwitch_mdsoya": SoyaFaceIDModelSwitch_mdsoya,
     "SoyaPassthrough_mdsoya": SoyaPassthrough_mdsoya,
     "SoyaModelPatcherRefresh_mdsoya": SoyaModelPatcherRefresh_mdsoya,
+    "SoyaStableModelPatcherReuse_mdsoya": SoyaStableModelPatcherReuse_mdsoya,
     "SoyaDiagnosticStableModelReuse_mdsoya": SoyaDiagnosticStableModelReuse_mdsoya,
     "SoyaDiagnosticModelProbe_mdsoya": SoyaDiagnosticModelProbe_mdsoya,
     "SoyaDiagnosticConditioningProbe_mdsoya": SoyaDiagnosticConditioningProbe_mdsoya,
@@ -211,6 +213,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaFaceIDModelSwitch_mdsoya": "Soya FaceID Model Switch (Soya)",
     "SoyaPassthrough_mdsoya": "Passthrough (Soya)",
     "SoyaModelPatcherRefresh_mdsoya": "ModelPatcher Refresh (Soya)",
+    "SoyaStableModelPatcherReuse_mdsoya": "Stable ModelPatcher Reuse (Soya)",
     "SoyaDiagnosticStableModelReuse_mdsoya": "Diagnostic Stable Model Reuse (Soya)",
     "SoyaDiagnosticModelProbe_mdsoya": "Diagnostic Model Probe (Soya)",
     "SoyaDiagnosticConditioningProbe_mdsoya": "Diagnostic Conditioning Probe (Soya)",

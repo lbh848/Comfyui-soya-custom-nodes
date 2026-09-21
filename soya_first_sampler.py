@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import threading
 import traceback
 from collections import OrderedDict
 
@@ -311,6 +312,9 @@ def _spectrum_sampler():
 class SoyaFirstSampler_mdsoya:
     def __init__(self):
         self._loaded_loras = OrderedDict()
+        self._stable_global_model = None
+        self._stable_global_signature = None
+        self._stable_global_lock = threading.RLock()
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -421,30 +425,75 @@ class SoyaFirstSampler_mdsoya:
         print(f"[1st sampler] LoRA 로드 완료: path={resolved}")
         return lora, resolved
 
-    def _apply_global_loras(self, model, entries):
-        current_model = model
+    @staticmethod
+    def _global_lora_signature(model, entries):
+        lora_signature = []
         for entry in entries:
-            lora, resolved = self._load_lora(entry)
-            try:
-                current_model, _ = comfy.sd.load_lora_for_models(
-                    current_model,
-                    None,
-                    lora,
-                    entry["strength"],
-                    0.0,
+            resolved = _resolve_lora_path(entry["lora_path"])
+            stat = os.stat(resolved)
+            lora_signature.append(
+                (
+                    os.path.normcase(resolved),
+                    int(stat.st_mtime_ns),
+                    int(stat.st_size),
+                    float(entry["strength"]),
                 )
-            except Exception as exc:
-                print(
-                    f"[1st sampler] 전역 LoRA 적용 실패: path={resolved}, "
-                    f"strength={entry['strength']}, error={exc}"
-                )
-                traceback.print_exc()
-                raise
-            print(
-                f"[1st sampler] 전역 캐릭터 LoRA 적용: path={resolved}, "
-                f"strength={entry['strength']}"
             )
-        return current_model
+        return (
+            id(model),
+            str(getattr(model, "clone_base_uuid", None)),
+            str(getattr(model, "patches_uuid", None)),
+            tuple(lora_signature),
+        )
+
+    def _apply_global_loras(self, model, entries):
+        if not entries:
+            print("[1st sampler] 전역 캐릭터 LoRA 없음: 안정 재사용 생략")
+            return model
+        signature = self._global_lora_signature(model, entries)
+        with self._stable_global_lock:
+            if (
+                self._stable_global_model is not None
+                and self._stable_global_signature == signature
+            ):
+                print(
+                    "[1st sampler] 캐릭터 ModelPatcher 안정 재사용 cache=hit: "
+                    f"loras={len(entries)}, "
+                    f"patches_uuid={getattr(self._stable_global_model, 'patches_uuid', None)}"
+                )
+                return self._stable_global_model
+
+            current_model = model
+            for entry in entries:
+                lora, resolved = self._load_lora(entry)
+                try:
+                    current_model, _ = comfy.sd.load_lora_for_models(
+                        current_model,
+                        None,
+                        lora,
+                        entry["strength"],
+                        0.0,
+                    )
+                except Exception as exc:
+                    print(
+                        f"[1st sampler] 전역 LoRA 적용 실패: path={resolved}, "
+                        f"strength={entry['strength']}, error={exc}"
+                    )
+                    traceback.print_exc()
+                    raise
+                print(
+                    f"[1st sampler] 전역 캐릭터 LoRA 적용: path={resolved}, "
+                    f"strength={entry['strength']}"
+                )
+            cache_state = "miss" if self._stable_global_model is None else "replace"
+            self._stable_global_signature = signature
+            self._stable_global_model = current_model
+            print(
+                f"[1st sampler] 캐릭터 ModelPatcher 안정 재사용 cache={cache_state}: "
+                f"loras={len(entries)}, "
+                f"patches_uuid={getattr(current_model, 'patches_uuid', None)}"
+            )
+            return current_model
 
     @staticmethod
     def _sample_stock_padded(
