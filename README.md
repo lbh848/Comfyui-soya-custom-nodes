@@ -4,8 +4,12 @@
 when `MULTI_CHAR=true`. The existing node ID, inputs, outputs, and sampler-mode
 choices are unchanged: restart ComfyUI to load the updated code; no workflow
 rewiring or configuration changes are needed. There is no separate experimental
-sampler node or switch. Single-character sampling keeps its existing global-LoRA
-behavior. Common style LoRAs remain on the incoming model; do not additionally
+sampler node or switch. Enabled regional payloads support one to three characters;
+a single character uses one mask and environment-only conditioning outside it.
+Its figure/pose composition remains in the character region rather than being
+repeated in the background branch.
+Sampling without a regional payload retains global-LoRA behavior.
+Common style LoRAs remain on the incoming model; do not additionally
 merge multi-character LoRAs into that model.
 
 ## Shared-pass spatial LoRA
@@ -56,3 +60,22 @@ settings, per-image timing, and peak allocated VRAM for an auditable comparison.
 By default it exercises the current `1st sampler`. For historical Hook A/B,
 pass `--baseline-sampler <path/to/pre-spatial/soya_first_sampler.py>`; the old
 implementation is loaded only by this manual test, not registered as a node.
+# Dynamic face masks
+
+The backend's `MULTI_CHAR.mask_render_version >= 5` enables dynamic face guards
+in the existing first sampler. Archived versions and `enable=false` retain their
+original behavior. Four CPU observations of Anima's linear latent preview expand
+character conditioning and spatial LoRA only into unclaimed background near
+detected faces. Sampling steps and diffusion evaluations are unchanged. Existing
+occupied ownership is preserved. Geometry and temporal overlap associate faces;
+this is not identity recognition and crossings/occlusions can remain ambiguous.
+
+This path uses the installed `ultralytics` package and
+`models/ultralytics/bbox/face_yolov8n.pt` on CPU, without runtime downloads or
+intermediate VAE decoding. Missing detector resources are logged and leave the
+source masks in use. Unused CUDA allocator blocks are returned after real
+forwards to limit Spectrum cache reservation; live tensors are preserved.
+The final applied token mask is published as `soya_dynamic_mask` UI metadata in
+Comfy history and a temporary PNG for the backend's STEP6 overlay. Input masks
+are never overwritten. The detector stays on CPU; per-execution GPU caches are
+released at completion or failure.

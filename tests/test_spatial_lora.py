@@ -35,6 +35,37 @@ def adapter(strength=1.0):
 
 
 class SpatialMathTests(unittest.TestCase):
+    def test_dynamic_outer_callback_keeps_original_schedule_and_releases_execution_state(self):
+        from importlib import import_module
+        tracking = import_module(f"{PACKAGE}.soya_face_tracking")
+        for positional in (False, True):
+            observed, callbacks = [], []
+            tracker = types.SimpleNamespace(
+                observe=lambda step, *args: observed.append(step),
+                clear_device_cache=mock.Mock(), last_weights="cpu-preview")
+            runtime = spatial._SpatialRuntime(types.SimpleNamespace(region_masks=[]), {}, object())
+            patcher = types.SimpleNamespace(model_options={"transformer_options": {spatial._KEY: runtime}})
+            class Executor:
+                class_obj = types.SimpleNamespace(model_patcher=patcher)
+                def __call__(self, *args, **kwargs):
+                    callback = args[5] if len(args) > 5 else kwargs["callback"]
+                    for step in range(30):
+                        callback(step, "x0", "x", 30)
+                    return "unchanged-result"
+            callback = lambda step, *args: callbacks.append(step)
+            args = ["noise", "latent", "sampler", torch.arange(31)]
+            kwargs = {}
+            if positional:
+                args.extend([None, callback])
+            else:
+                kwargs["callback"] = callback
+            with mock.patch.object(tracking, "FaceTracker", return_value=tracker):
+                self.assertEqual(spatial._sample_wrapper(Executor(), *args, **kwargs), "unchanged-result")
+            self.assertEqual(observed, [4, 11, 16, 27])
+            self.assertEqual(callbacks, list(range(30)))
+            tracker.clear_device_cache.assert_called_once()
+            self.assertIs(runtime.tracker, tracker)
+
     def test_two_and_three_regions_overlap_budget_and_uncovered_background(self):
         for count in (2, 3):
             masks = [torch.zeros(1, 4, 8) for _ in range(count)]
@@ -56,6 +87,39 @@ class SpatialMathTests(unittest.TestCase):
             self.assertEqual(weights.shape, (2, expected))
             torch.testing.assert_close(weights[1], torch.ones(expected))
             self.assertFalse(weights[0].any())
+
+    def test_dynamic_box_fills_fractional_source_edges_on_1256x864_canvas(self):
+        from importlib import import_module
+        tracking = import_module(f"{PACKAGE}.soya_face_tracking")
+        # Source rectangles from the reported illustration, before token pooling.
+        masks = [torch.zeros(1, 1024, 1024) for _ in range(2)]
+        masks[0][:, 307:973, 20:277] = 1
+        masks[1][:, 409:922, 614:922] = 1
+        latent_format = types.SimpleNamespace(
+            latent_rgb_factors=[[0, 0, 0]] * 16, spacial_downscale_ratio=8)
+        for mirror in (False, True):
+            with self.subTest(mirror=mirror):
+                source = [mask.flip(-1) if mirror else mask for mask in masks]
+                boxes = [(40, 48, 360, 272), (776, 272, 856, 328)]
+                if mirror:
+                    boxes = [(1256 - right, top, 1256 - left, bottom)
+                             for left, top, right, bottom in boxes]
+                tracker = tracking.FaceTracker(source, latent_format, lambda image: boxes)
+                tracker.observe(4, torch.zeros(1, 16, 1, 108, 157))
+                original = spatial._token_weights(source, (1, 108, 157), 2, 1)
+                saved = original.clone()
+                result, bias = tracker.layout(
+                    original, [2, 2, 2], (1, 108, 157), types.SimpleNamespace(patch_spatial=2),
+                    torch.device("cpu"), torch.float32, spatial._build_flux_cross_attention_bias)
+                for slot in (1, 2):
+                    seams = (original[slot] > 0) & (original[slot] < 1)
+                    self.assertTrue(seams.any())
+                    self.assertTrue((result[slot, seams] == 1).all())
+                    self.assertTrue((result[0, seams] == 0).all())
+                    self.assertTrue(torch.isneginf(bias[0, 0, seams, :2]).all())
+                self.assertTrue(((result == 0) | (result == 1)).all())
+                torch.testing.assert_close(result.sum(0), torch.ones(result.shape[1]))
+                torch.testing.assert_close(original, saved)
 
     def test_image_residual_is_zero_outside_region_in_flat_and_grid_shapes(self):
         weights = torch.tensor([[0., 0., 1., 1.], [1., 0., 0., 0.], [0., 1., 0., 0.]])

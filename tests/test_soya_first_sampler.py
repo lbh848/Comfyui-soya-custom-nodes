@@ -23,6 +23,7 @@ def _load_module():
     comfy.hooks = types.ModuleType("comfy.hooks")
     comfy.samplers = types.ModuleType("comfy.samplers")
     comfy.sd = types.ModuleType("comfy.sd")
+    comfy.sd.load_lora_for_models = None
     comfy.utils = types.ModuleType("comfy.utils")
 
     # Legacy conditioning hooks must not be used by either sampler path.
@@ -117,6 +118,15 @@ def _lora_data(entries):
 
 
 class FirstSamplerTests(unittest.TestCase):
+    def test_dynamic_version_is_opt_in_for_archived_payloads(self):
+        payload = json.loads(_multi_char_payload(["Mira"]))
+        self.assertEqual(MODULE._parse_multi_char(json.dumps(payload))["mask_render_version"], 1)
+        for version in (3, 4, 5):
+            payload["mask_render_version"] = version
+            self.assertEqual(MODULE._parse_multi_char(json.dumps(payload))["mask_render_version"], version)
+        self.assertFalse(MODULE._parse_multi_char('{"enable": false, "mask_render_version": 5}')["enable"])
+        self.assertEqual(FirstSampler.INPUT_TYPES()["hidden"], {"unique_id": "UNIQUE_ID"})
+
     def _dispatch(self, node, sampler_mode, spectrum_options=None):
         return node._sample_selected(
             sampler_mode,
@@ -661,7 +671,9 @@ class FirstSamplerTests(unittest.TestCase):
         optional = ("sampler_mode", "spectrum_options")
         self.assertEqual(tuple(FirstSampler.INPUT_TYPES()["required"]), required)
         self.assertEqual(tuple(FirstSampler.INPUT_TYPES()["optional"]), optional)
-        self.assertEqual(tuple(inspect.signature(FirstSampler.sample).parameters), ("self",) + required + optional)
+        self.assertEqual(tuple(inspect.signature(FirstSampler.sample).parameters),
+                         ("self",) + required + optional + ("unique_id",))
+        self.assertIsNone(inspect.signature(FirstSampler.sample).parameters["unique_id"].default)
         self.assertEqual(FirstSampler.RETURN_TYPES, ("LATENT", "MODEL"))
         self.assertEqual(FirstSampler.RETURN_NAMES, ("output", "model"))
         self.assertEqual(FirstSampler.FUNCTION, "sample")
@@ -688,7 +700,7 @@ class FirstSamplerTests(unittest.TestCase):
 
     def test_spatial_sampler_routes_by_slot_without_hook_or_global_merge(self):
         spatial = types.ModuleType(f"{PACKAGE_NAME}.soya_spatial_lora")
-        for names in (("Hibiki", "Hoshino"), ("Aster", "Briar"), ("North", "South", "West")):
+        for names in (("Shoko",), ("Aster",), ("Hibiki", "Hoshino"), ("Aster", "Briar"), ("North", "South", "West")):
             with self.subTest(names=names):
                 node = FirstSampler()
                 model, patched, sampled = object(), object(), object()
@@ -699,6 +711,8 @@ class FirstSamplerTests(unittest.TestCase):
                 # Two adapters on one character and a different file order
                 # must not change the relationship to the mask and prompt.
                 entries.append((names[0], "test_extra.safetensors", -.2))
+                payload = json.loads(_multi_char_payload(names))
+                payload["composition_prompt"] = f"{len(names)} figures in a clear composition"
                 with (
                     mock.patch.dict(sys.modules, {spatial.__name__: spatial}),
                     mock.patch.object(node, "_load_lora", side_effect=lambda entry: (entry["lora_path"], entry["lora_path"])),
@@ -708,7 +722,7 @@ class FirstSamplerTests(unittest.TestCase):
                 ):
                     result = node.sample(
                         model=model, positive=[["base", {}]], negative=[["negative", {}]], clip=clip,
-                        multi_char=_multi_char_payload(names), seed=7, latent_image={"samples": object()},
+                        multi_char=json.dumps(payload), seed=7, latent_image={"samples": object()},
                         LORA_ACT="true", LORA_DATA=_lora_data(entries), mask_location="test-only", steps=30,
                         cfg=5, sampler_name="euler", scheduler="simple", denoise=1., split_mode="single",
                         spd_scale=.5, spd_sigma=.7, adaptive_smc_alpha=0., sampler_mode="KSampler",
@@ -719,6 +733,13 @@ class FirstSamplerTests(unittest.TestCase):
                 self.assertIs(applied[2], masks)
                 for index, name in enumerate(names):
                     self.assertIn(f"{name} profile", applied[3][index][0][0])
+                    self.assertIn(payload["composition_prompt"], applied[3][index][0][0])
+                background = applied[4][0][0]
+                if len(names) == 1:
+                    self.assertNotIn(payload["composition_prompt"], background)
+                    self.assertIn("shared background", background)
+                else:
+                    self.assertIn(payload["composition_prompt"], background)
                 self.assertIs(selected.call_args.args[1], patched)
                 self.assertEqual(len(selected.call_args.args[7]), 1)
                 self.assertEqual(len(selected.call_args.args[8]), 1)

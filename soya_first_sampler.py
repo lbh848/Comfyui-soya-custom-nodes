@@ -187,8 +187,8 @@ def _parse_multi_char(value):
         char_num = int(payload.get("char_num"))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"MULTI_CHAR.char_num이 정수가 아닙니다: {payload.get('char_num')!r}") from exc
-    if not 2 <= char_num <= 3:
-        raise ValueError(f"MULTI_CHAR는 2~3명만 지원합니다: {char_num}")
+    if not 1 <= char_num <= 3:
+        raise ValueError(f"MULTI_CHAR는 1~3명만 지원합니다: {char_num}")
 
     names = payload.get("char_name_list")
     char_inform = payload.get("char_inform")
@@ -238,8 +238,15 @@ def _parse_multi_char(value):
         character not in "0123456789abcdef" for character in mask_fingerprint
     ):
         raise ValueError("MULTI_CHAR.mask_fingerprint는 SHA-256 hex 문자열이어야 합니다")
+    try:
+        mask_render_version = int(payload.get("mask_render_version") or 1)
+    except (TypeError, ValueError) as exc:
+        print(f"[1st sampler] Invalid optional mask version; retaining legacy behavior: {exc}")
+        traceback.print_exc()
+        mask_render_version = 1
     return {
         "enable": True,
+        "mask_render_version": mask_render_version,
         "char_num": char_num,
         "char_name_list": clean_names,
         "char_inform": clean_inform,
@@ -363,6 +370,7 @@ class SoyaFirstSampler_mdsoya:
                     {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.05, "round": 0.001},
                 ),
             },
+            "hidden": {"unique_id": "UNIQUE_ID"},
             "optional": {
                 "sampler_mode": (
                     _SAMPLER_MODES,
@@ -730,6 +738,7 @@ class SoyaFirstSampler_mdsoya:
         adaptive_smc_alpha,
         sampler_mode=_SAMPLER_MODE_FAST,
         spectrum_options=None,
+        unique_id=None,
     ):
         try:
             payload = _parse_multi_char(multi_char)
@@ -790,7 +799,7 @@ class SoyaFirstSampler_mdsoya:
                 + payload["shared_before"]
                 + payload["shared_after"]
             )
-            if payload["composition_prompt"] not in background_parts:
+            if payload["char_num"] > 1 and payload["composition_prompt"] not in background_parts:
                 background_parts.append(payload["composition_prompt"])
             if (
                 payload["background_prompt"]
@@ -824,6 +833,7 @@ class SoyaFirstSampler_mdsoya:
                     print(f"[1st sampler] 캐릭터에 적용할 Anima LoRA가 없습니다: char={name!r}; 영역 프롬프트만 적용")
             regional_model = apply_spatial_loras(
                 model, loaded, masks, spatial_conditionings, background_conditioning,
+                **({"face_tracking": True} if payload["mask_render_version"] >= 5 else {}),
             )
             print(
                 "[1st sampler] MULTI_CHAR=true · 공간 LoRA residual + 공유 모델 계산 "
@@ -855,6 +865,15 @@ class SoyaFirstSampler_mdsoya:
             )
             # 후단 HRF/디테일러에는 전역 all-character LoRA 모델이 아니라
             # 원래 clean model을 넘겨 첫 패스의 영역 분리를 재오염하지 않는다.
+            if unique_id is not None and payload["mask_render_version"] >= 5:
+                runtime = regional_model.model_options["transformer_options"]["soya_spatial_lora"]
+                if runtime.tracker is not None:
+                    samples = latent_image["samples"]
+                    size = (samples.shape[-1] * runtime.tracker.scale,
+                            samples.shape[-2] * runtime.tracker.scale)
+                    reference = runtime.tracker.export(size)
+                    if reference is not None:
+                        return {"ui": {"soya_dynamic_mask": [reference]}, "result": (result[0], model)}
             return result[0], model
         except Exception as exc:
             print(

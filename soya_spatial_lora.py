@@ -88,18 +88,33 @@ def _route_residual(x, output, adapter, role, slot, weights, text_lengths):
 
 
 class _SpatialRuntime:
-    def __init__(self, conditioning, patches):
+    def __init__(self, conditioning, patches, latent_format=None):
         self.conditioning = conditioning
         self.patches = patches  # CPU adapters, keyed by native model path
         self.prepared = {}
         self.adapters = {}
         self.layouts = {}
         self.forward_count = 0
+        self.latent_format = latent_format
+        self.tracker = None
 
     def clear(self):
         self.prepared.clear()
         self.adapters.clear()
         self.layouts.clear()
+        if self.tracker is not None:
+            self.tracker.clear_device_cache()
+
+    def begin(self):
+        self.tracker = None
+        if self.latent_format is not None:
+            try:
+                from .soya_face_tracking import FaceTracker
+                self.tracker = FaceTracker(self.conditioning.region_masks, self.latent_format)
+                print("[FACE_TRACK] Dynamic masks enabled; CPU preview, no additional sampling steps")
+            except Exception as exc:
+                print(f"[FACE_TRACK] Initialization failed; retaining source masks: {exc}")
+                traceback.print_exc()
 
     def contexts(self, dit, device, dtype):
         key = (device, dtype)
@@ -120,7 +135,14 @@ class _SpatialRuntime:
                 weights > 1e-6, lengths, "uncovered_only", device, dtype,
             )
             self.layouts[key] = weights, bias
-        return self.layouts[key]
+        original = self.layouts[key]
+        if self.tracker is not None:
+            tracked = self.tracker.layout(
+                original[0], lengths, shape, dit, device, dtype, _build_flux_cross_attention_bias,
+            )
+            if tracked is not None:
+                return tracked
+        return original
 
     def layer_hook(self, entries, weights, lengths, module, args, kwargs, output):
         x = args[0] if args else kwargs["input"]
@@ -201,15 +223,41 @@ def _diffusion_wrapper(executor, *args, **kwargs):
             handle.remove()
         for attention, original in attention_ops:
             attention.attn_op = original
+        if runtime.latent_format is not None and x.is_cuda:
+            # Spectrum retains live feature history. Return only unused CUDA
+            # allocator blocks; this does not modify that history or tensors.
+            with torch.cuda.device(x.device):
+                torch.cuda.empty_cache()
 
 
 def _sample_wrapper(executor, *args, **kwargs):
     runtime = executor.class_obj.model_patcher.model_options["transformer_options"][_KEY]
     runtime.clear()
     runtime.forward_count = 0
+    runtime.begin()
     try:
+        if runtime.tracker is not None:
+            from .soya_face_tracking import observation_steps
+            sigmas = args[3] if len(args) > 3 else kwargs["sigmas"]
+            checkpoints = observation_steps(len(sigmas) - 1)
+            callback = args[5] if len(args) > 5 else kwargs.get("callback")
+
+            def observe(step, x0, x, total_steps):
+                if callback is not None:
+                    callback(step, x0, x, total_steps)
+                if step in checkpoints:
+                    runtime.tracker.observe(step, x0)
+
+            if len(args) > 5:
+                args = list(args)
+                args[5] = observe
+            else:
+                kwargs["callback"] = observe
+            if not checkpoints:
+                print(f"[FACE_TRACK] Schedule too short to apply an observation: steps={len(sigmas) - 1}")
         return executor(*args, **kwargs)
     except Exception as exc:
+        runtime.tracker = None
         print(f"[spatial LoRA] Sampling failed: forwards={runtime.forward_count}, error={exc}")
         traceback.print_exc()
         raise
@@ -218,7 +266,7 @@ def _sample_wrapper(executor, *args, **kwargs):
         runtime.clear()
 
 
-def apply_spatial_loras(model, loras, masks, conditionings, background):
+def apply_spatial_loras(model, loras, masks, conditionings, background, *, face_tracking=False):
     """Return a spatially routed clone; never merge or change incoming weights."""
     try:
         dit = _validate_anima_model(model)
@@ -245,7 +293,7 @@ def apply_spatial_loras(model, loras, masks, conditionings, background):
         conditioning = AnimaRegionalConditioningPatch(
             regions, "uncovered_only", 1.0, float("inf"), 0.0, 1.0, 0.0, 0.0, 1, 1, background,
         )
-        runtime = _SpatialRuntime(conditioning, patches)
+        runtime = _SpatialRuntime(conditioning, patches, model.model.latent_format if face_tracking else None)
         patched = model.clone()
         patched.model_options.setdefault("transformer_options", {})[_KEY] = runtime
         for kind, wrapper in (
