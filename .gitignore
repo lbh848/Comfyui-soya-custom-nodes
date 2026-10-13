@@ -5,3 +5,6 @@ CLAUDE.md
 .civitai_api_key
 soya_scheduler/node_info.json
 models/
+
+# 테스트 코드 (로컬 전용, git 공유 대상 아님)
+tests/
