@@ -152,29 +152,61 @@ class FaceTracker:
         if key == self.cache_key:
             return self.cached
         weights = original.clone()
-        added = {}
+        cell = dit.patch_spatial * self.scale
+        px = ((torch.arange(width, device=device, dtype=torch.float32) + .5) * cell).repeat(height)
+        py = ((torch.arange(height, device=device, dtype=torch.float32) + .5) * cell).repeat_interleave(width)
+        coverage = torch.zeros_like(original[1:], dtype=torch.bool)
+        cores = torch.zeros_like(coverage)
+        scores = torch.full(coverage.shape, float("inf"), device=device, dtype=torch.float32)
+        face_scores = torch.full_like(scores, float("inf"))
+        centerlines = {}
         for subject, box in sorted(self.faces.items()):
             x0, y0, x1, y1 = box
             dx, dy = (x1 - x0) * 0.2, (y1 - y0) * 0.2
             rx, ry, rw, rh = self.regions[subject]
-            # Enclose the source region and padded face, including the gap.
-            left = max(0, math.floor(min(rx, (x0 - dx) / self.width) * width))
-            right = min(width, math.ceil(max(rx + rw, (x1 + dx) / self.width) * width))
-            top = max(0, math.floor(min(ry, (y0 - dy) / self.height) * height))
-            bottom = min(height, math.ceil(max(ry + rh, (y1 + dy) / self.height) * height))
-            region = torch.zeros((height, width), device=device, dtype=torch.bool)
-            region[top:bottom, left:right] = True
-            # Complete this subject's pooled edge cells; preserve other owners,
-            # including regions claimed earlier in this observation.
-            other = weights[1:].sum(0) - weights[subject + 1]
-            take = region.flatten() & (other <= 1e-6) & (weights[subject + 1] < 1)
-            added[subject] = int(take.sum().item())
-            weights[subject + 1, take] = 1
-            weights[0, take] = 0
+            left = max(0, math.floor(min(rx * self.width, x0 - dx) / cell))
+            right = min(width, math.ceil(max((rx + rw) * self.width, x1 + dx) / cell))
+            top = max(0, math.floor(min(ry * self.height, y0 - dy) / cell))
+            bottom = min(height, math.ceil(max((ry + rh) * self.height, y1 + dy) / cell))
+            coverage[subject].view(height, width)[top:bottom, left:right] = True
+
+            # Distances use image pixels, including the actual padded token grid.
+            fx, fy = (x0 + x1) / 2, (y0 + y1) / 2
+            bx, by = (rx + rw / 2) * self.width, (ry + rh / 2) * self.height
+            vx, vy = bx - fx, by - fy
+            projection = (((px - fx) * vx + (py - fy) * vy) / max(vx * vx + vy * vy, 1)).clamp(0, 1)
+            distance = (px - fx - projection * vx) ** 2 + (py - fy - projection * vy) ** 2
+            scores[subject] = torch.where(coverage[subject], distance, float("inf"))
+            centerlines[subject] = ((fx, fy), (bx, by))
+
+            guard = torch.zeros((height, width), device=device, dtype=torch.bool)
+            guard[max(0, math.floor((y0 - dy) / cell)):min(height, math.ceil((y1 + dy) / cell)),
+                  max(0, math.floor((x0 - dx) / cell)):min(width, math.ceil((x1 + dx) / cell))] = True
+            face_scores[subject] = torch.where(guard.flatten(), (px - fx) ** 2 + (py - fy) ** 2, float("inf"))
+            cores[subject].view(height, width)[
+                max(0, math.floor(y0 / cell)):min(height, math.ceil(y1 / cell)),
+                max(0, math.floor(x0 / cell)):min(width, math.ceil(x1 / cell))] = True
+
+        minimum, owners = scores.min(0)
+        source_owner = original[1:].argmax(0)
+        source_score = scores.gather(0, source_owner.unsqueeze(0)).squeeze(0)
+        owners = torch.where(source_score == minimum, source_owner, owners)
+        # An observed face outranks another face's padding and every body box.
+        face_scores.masked_fill_(cores.any(0).unsqueeze(0) & ~cores, float("inf"))
+        face_minimum, face_owners = face_scores.min(0)
+        guarded = torch.isfinite(face_minimum)
+        owners = torch.where(guarded, face_owners, owners)
+        protected = ((original[1:] > 1e-6) & ~coverage).any(0)
+        take = torch.isfinite(minimum) & (~protected | guarded)
+        weights[:, take] = 0
+        changed = {}
+        for subject in self.faces:
+            weights[subject + 1, take & (owners == subject)] = 1
+            changed[subject] = int((weights[subject + 1] != original[subject + 1]).sum().item())
         bias = build_bias(weights > 1e-6, lengths, "uncovered_only", device, dtype)
         self.cache_key, self.cached = key, (weights, bias)
         self.last_weights = weights.detach().float().cpu().numpy().reshape(-1, height, width)
-        print(f"[FACE_TRACK_MASK] epoch={self.epoch}, added_tokens={added}")
+        print(f"[FACE_TRACK_MASK] epoch={self.epoch}, centerlines={centerlines}, changed_tokens={changed}")
         return self.cached
 
     def export(self, size):

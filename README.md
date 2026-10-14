@@ -64,11 +64,15 @@ implementation is loaded only by this manual test, not registered as a node.
 
 The backend's `MULTI_CHAR.mask_render_version >= 5` enables dynamic face guards
 in the existing first sampler. Archived versions and `enable=false` retain their
-original behavior. Four CPU observations of Anima's linear latent preview expand
-character conditioning and spatial LoRA only into unclaimed background near
-detected faces. Sampling steps and diffusion evaluations are unchanged. Existing
-occupied ownership is preserved. Geometry and temporal overlap associate faces;
-this is not identity recognition and crossings/occlusions can remain ambiguous.
+original behavior. Four CPU observations of Anima's linear latent preview connect
+each detected face center to its source-mask bounding-box center. Overlapping
+face/body envelopes are assigned by distance to these centerline segments in
+image pixels. Detected face boxes take priority over body ownership and other
+faces' padding; overlapping face guards use distance to the face centers.
+Source regions without a detected face are preserved outside the face guards.
+Sampling steps and diffusion evaluations are unchanged. Geometry and temporal
+overlap associate faces; this is not identity recognition or body detection,
+and crossings/occlusions can remain ambiguous.
 
 This path uses the installed `ultralytics` package and
 `models/ultralytics/bbox/face_yolov8n.pt` on CPU, without runtime downloads or
