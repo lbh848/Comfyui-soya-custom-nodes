@@ -70,6 +70,9 @@ face/body envelopes are assigned by distance to these centerline segments in
 image pixels. Detected face boxes take priority over body ownership and other
 faces' padding; overlapping face guards use distance to the face centers.
 Source regions without a detected face are preserved outside the face guards.
+Face assignment minimizes total distance to the original mask regions first;
+previous face-box overlap breaks ties only, so an early mismatch cannot outweigh
+the source layout at later observations.
 Sampling steps and diffusion evaluations are unchanged. Geometry and temporal
 overlap associate faces; this is not identity recognition or body detection,
 and crossings/occlusions can remain ambiguous.

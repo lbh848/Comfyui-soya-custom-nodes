@@ -45,7 +45,7 @@ def _detect(image):
 
 
 def associate(boxes, regions, previous, width, height):
-    """Match geometry, then temporal overlap; never infer identity from names."""
+    """Minimize source-mask distance first; use temporal overlap only to break ties."""
     count = min(len(boxes), len(regions))
     if not count:
         print("[FACE_TRACK] No detected face; retaining preceding geometry")
@@ -55,24 +55,26 @@ def associate(boxes, regions, previous, width, height):
         x, y = (box[0] + box[2]) / (2 * width), (box[1] + box[3]) / (2 * height)
         rx, ry, rw, rh = regions[subject]
         geometric = (max(rx - x, 0, x - rx - rw) / rw
-                     + max(ry - y, 0, y - ry - rh) / rh
-                     + abs(x - rx - rw / 2) / rw)
+                     + max(ry - y, 0, y - ry - rh) / rh)
         if subject not in previous:
-            return 1 + 0.05 * geometric
+            return geometric, 1
         a, b = box, previous[subject]
         intersection = (max(0, min(a[2], b[2]) - max(a[0], b[0]))
                         * max(0, min(a[3], b[3]) - max(a[1], b[1])))
         union = ((a[2] - a[0]) * (a[3] - a[1])
                  + (b[2] - b[0]) * (b[3] - b[1]) - intersection)
-        return 1 - intersection / max(union, 1) + 0.05 * geometric
+        return geometric, 1 - intersection / max(union, 1)
 
     candidates = (
-        (sum(cost(boxes[b], s) for b, s in zip(chosen, subjects)),
+        ([cost(boxes[b], s) for b, s in zip(chosen, subjects)],
          {s: boxes[b] for b, s in zip(chosen, subjects)})
         for chosen in itertools.combinations(range(len(boxes)), count)
         for subjects in itertools.permutations(range(len(regions)), count)
     )
-    return min(candidates, key=lambda item: item[0])[1]
+    return min(candidates, key=lambda item: (
+        sum(score[0] for score in item[0]),
+        sum(score[1] for score in item[0]),
+    ))[1]
 
 
 def observation_steps(total):
