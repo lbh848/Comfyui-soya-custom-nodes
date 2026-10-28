@@ -14,7 +14,7 @@ from functools import partial
 import torch
 import torch.nn.functional as F
 
-import comfy.hooks
+import comfy.sd
 import comfy.patcher_extension
 
 from .soya_character_lora import _merged_path_reason
@@ -273,8 +273,15 @@ def apply_spatial_loras(model, loras, masks, conditionings, background, *, face_
         roles = _layer_roles(dit)
         patches = {}
         for index, lora, strength in loras:
-            mapped, _, group = comfy.hooks.load_hook_lora_for_models(model, None, lora, strength, 0.0)
-            native = mapped.hook_patches[group.hooks[0].hook_ref]
+            # Use the same loader as unmasked sampling, including installed
+            # Anima 28-to-40 remapping. Only route the newly added adapters;
+            # incoming style patches already belong to the shared model.
+            mapped, _ = comfy.sd.load_lora_for_models(model, None, lora, strength, 0.0)
+            native = {
+                key: entries[len(model.patches.get(key, ())):]
+                for key, entries in mapped.patches.items()
+                if len(entries) > len(model.patches.get(key, ()))
+            }
             reason = _merged_path_reason(mapped, native)
             if reason is not None or not native:
                 raise RuntimeError(f"Spatial LoRA cannot execute this adapter: {reason or 'no matching layers'}")

@@ -1,14 +1,20 @@
 # Comfyui-soya-custom-nodes
 
 `SoyaFirstSampler_mdsoya` (`1st sampler`) uses shared-pass spatial LoRA routing
-when `MULTI_CHAR=true`. The existing node ID, inputs, outputs, and sampler-mode
-choices are unchanged: restart ComfyUI to load the updated code; no workflow
-rewiring or configuration changes are needed. There is no separate experimental
+when `MULTI_CHAR=true`. The existing node ID, inputs, first two outputs, and sampler-mode
+choices are unchanged: restart ComfyUI to load the updated code. There is no separate experimental
 sampler node or switch. Enabled regional payloads support one to three characters;
 a single character uses one mask and environment-only conditioning outside it.
 Its figure/pose composition remains in the character region rather than being
 repeated in the background branch.
 Sampling without a regional payload retains global-LoRA behavior.
+The v3.7 normal and fast Anima workflows expose an additional `face_positions`
+STRING output: a JSON array of `{"name": "...", "bbox": [x1, y1, x2, y2]}`.
+Coordinates are normalized to the unpadded first-pass image, with a top-left
+origin. They are the last tracked face boxes, not a new final-image detection.
+The same array is returned in Comfy history as `soya_face_positions` and recorded
+on the backend image-flow node. Missing faces are omitted; disabled tracking or
+no detections returns `[]`. Mask-preview export failure does not discard positions.
 Common style LoRAs remain on the incoming model; do not additionally
 merge multi-character LoRAs into that model.
 

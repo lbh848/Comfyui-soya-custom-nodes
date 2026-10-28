@@ -247,6 +247,7 @@ def _parse_multi_char(value):
     return {
         "enable": True,
         "mask_render_version": mask_render_version,
+        "panels": payload.get("panels") or [],
         "char_num": char_num,
         "char_name_list": clean_names,
         "char_inform": clean_inform,
@@ -397,8 +398,8 @@ class SoyaFirstSampler_mdsoya:
             }
         }
 
-    RETURN_TYPES = ("LATENT", "MODEL")
-    RETURN_NAMES = ("output", "model")
+    RETURN_TYPES = ("LATENT", "MODEL", "STRING")
+    RETURN_NAMES = ("output", "model", "face_positions")
     FUNCTION = "sample"
     CATEGORY = "sampling"
     DESCRIPTION = (
@@ -768,7 +769,7 @@ class SoyaFirstSampler_mdsoya:
                     adaptive_smc_alpha,
                     spectrum_options,
                 )
-                return result[0], global_model
+                return result[0], global_model, "[]"
 
             lora_entries = _parse_lora_entries(
                 LORA_ACT,
@@ -831,9 +832,14 @@ class SoyaFirstSampler_mdsoya:
             for name, count in lora_counts.items():
                 if count == 0:
                     print(f"[1st sampler] 캐릭터에 적용할 Anima LoRA가 없습니다: char={name!r}; 영역 프롬프트만 적용")
+            # One identity may occur in several cuts; the single-face tracker
+            # must not expand those disjoint masks across panel gutters.
+            face_tracking = payload["mask_render_version"] >= 5 and not payload["panels"]
+            if payload["panels"]:
+                print("[1st sampler] 컷별 인물 마스크 유지 · 얼굴 추적으로 영역 변경 생략")
             regional_model = apply_spatial_loras(
                 model, loaded, masks, spatial_conditionings, background_conditioning,
-                **({"face_tracking": True} if payload["mask_render_version"] >= 5 else {}),
+                **({"face_tracking": True} if face_tracking else {}),
             )
             print(
                 "[1st sampler] MULTI_CHAR=true · 공간 LoRA residual + 공유 모델 계산 "
@@ -852,7 +858,7 @@ class SoyaFirstSampler_mdsoya:
                 cfg,
                 sampler_name,
                 scheduler,
-                background_conditioning,
+                positive,
                 negative,
                 clip,
                 latent_image,
@@ -865,16 +871,32 @@ class SoyaFirstSampler_mdsoya:
             )
             # 후단 HRF/디테일러에는 전역 all-character LoRA 모델이 아니라
             # 원래 clean model을 넘겨 첫 패스의 영역 분리를 재오염하지 않는다.
-            if unique_id is not None and payload["mask_render_version"] >= 5:
+            face_positions = []
+            ui = {}
+            if face_tracking:
                 runtime = regional_model.model_options["transformer_options"]["soya_spatial_lora"]
                 if runtime.tracker is not None:
                     samples = latent_image["samples"]
                     size = (samples.shape[-1] * runtime.tracker.scale,
                             samples.shape[-2] * runtime.tracker.scale)
-                    reference = runtime.tracker.export(size)
-                    if reference is not None:
-                        return {"ui": {"soya_dynamic_mask": [reference]}, "result": (result[0], model)}
-            return result[0], model
+                    # Tracking uses the padded first-pass canvas. Crop, rather
+                    # than rescale, before normalizing to the returned image.
+                    for index, box in sorted(runtime.tracker.faces.items()):
+                        bbox = [max(0.0, min(1.0, float(value) / size[axis % 2]))
+                                for axis, value in enumerate(box)]
+                        if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+                            print(f"[FACE_TRACK] Face outside returned canvas: index={index}, box={box}, size={size}")
+                            continue
+                        face_positions.append({"name": payload["char_name_list"][index], "bbox": bbox})
+                    if unique_id is not None:
+                        reference = runtime.tracker.export(size)
+                        if reference is not None:
+                            ui["soya_dynamic_mask"] = [reference]
+                if not face_positions:
+                    print("[FACE_TRACK] No tracked faces available; returning empty face positions")
+                ui["soya_face_positions"] = face_positions
+            output = (result[0], model, json.dumps(face_positions, ensure_ascii=False))
+            return {"ui": ui, "result": output} if ui else output
         except Exception as exc:
             print(
                 f"[1st sampler] 샘플링 실패: mask_location={mask_location!r}, "

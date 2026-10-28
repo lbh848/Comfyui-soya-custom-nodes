@@ -335,11 +335,10 @@ def _masked_attn_op(
         # Move to compute device/dtype; [B, 1, S_q, S_k] broadcasts over H.
         bias = attn_bias.to(device=q.device, dtype=q.dtype)
 
-    # PyTorch SDPA: if bias has -inf entries, those positions get ~0 weight after
-    # softmax — hard spatial boundaries rather than a soft output blend.
+    # The selected backend may accept mask kwargs but ignore them (e.g.
+    # SageAttention auto). SDPA must enforce the regional score bias here.
+    # The model's global self-attention keeps its original backend.
     out = F.scaled_dot_product_attention(q_b, k_b, v_b, attn_mask=bias)
-
-    # [B, H, Sq, D] → [B, Sq, H*D]
     return out.permute(0, 2, 1, 3).reshape(B, Sq, H * D)
 
 
