@@ -35,7 +35,7 @@ The sampler reads these settings through the saved graph connections. The
 server does not override illustration sampler inputs. The parser also reads
 the four separate blocks in older backups. Unconnected workflows can still use
 the existing individual sampler widgets. `snapref_model` names a separately downloaded
-`snapref_v1a.safetensors` in the LoRA model directory (or its full path).
+`snapref_v1b.safetensors` in the LoRA model directory (or its full path).
 
 Asset workflows connect `SoyaAssetV2PromptParser`'s `SNAPREF` output to the same
 sampler input. Their JSON also includes `"dir":"soya_snapref/..."` for the
