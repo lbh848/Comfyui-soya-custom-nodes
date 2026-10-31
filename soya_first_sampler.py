@@ -17,6 +17,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
+from .soya_ref_image_loader import SoyaRefImageLoader_mdsoya
 
 from .soya_spectrum_mod_guidance import (
     _SPECTRUM_MOD_OPTIONS_TYPE,
@@ -395,6 +396,14 @@ class SoyaFirstSampler_mdsoya:
                         ),
                     },
                 ),
+                "vae": ("VAE",),
+                "FACE_ID_DIR": ("STRING", {"default": "", "forceInput": True}),
+                "snapref_enabled": ("BOOLEAN", {"default": False, "tooltip": "캐릭터 대표 이미지를 각 마스크의 참조로 사용합니다."}),
+                "snapref_model": ("STRING", {"default": "snapref_v1a.safetensors"}),
+                "snapref_mode": (["char", "cs"], {"default": "char", "tooltip": "char: 캐릭터 외형 · cs: 외형과 화풍"}),
+                "snapref_megapixels": ("FLOAT", {"default": 1.0, "min": 0.25, "max": 2.0, "step": 0.25}),
+                "snapref_strength": ("FLOAT", {"default": 0.0, "min": -3.0, "max": 3.0, "step": 0.1, "tooltip": "0은 기본 강도입니다. 값을 높이면 참조를 더 강하게 반영합니다."}),
+                "SNAPREF": ("STRING", {"default": "", "forceInput": True}),
             }
         }
 
@@ -740,19 +749,83 @@ class SoyaFirstSampler_mdsoya:
         sampler_mode=_SAMPLER_MODE_FAST,
         spectrum_options=None,
         unique_id=None,
+        vae=None,
+        FACE_ID_DIR="",
+        snapref_enabled=False,
+        snapref_model="snapref_v1a.safetensors",
+        snapref_mode="char",
+        snapref_megapixels=1.0,
+        snapref_strength=0.0,
+        SNAPREF="",
     ):
         try:
+            if str(SNAPREF or "").strip():
+                reference_settings = json.loads(SNAPREF)
+                snapref_enabled = reference_settings.get("enabled", snapref_enabled)
+                snapref_strength = float(reference_settings.get("strength", snapref_strength))
+                snapref_mode = reference_settings.get("mode", snapref_mode)
+                snapref_megapixels = float(reference_settings.get("megapixels", snapref_megapixels))
+                FACE_ID_DIR = reference_settings.get("dir", FACE_ID_DIR)
             payload = _parse_multi_char(multi_char)
+            snapref = None
+            if snapref_enabled:
+                from .soya_snapref import SnapRef
+                raw_refs = str(FACE_ID_DIR or "").strip()
+                ref_data = json.loads(raw_refs) if raw_refs.startswith("{") else {
+                    "list": [{"CHAR": "", "ipa_path": raw_refs}] if raw_refs else []
+                }
+                entries = ref_data.get("list", [])
+                names = payload["char_name_list"] if payload["enable"] else [str(entry.get("CHAR") or "") for entry in entries]
+                if not payload["enable"] and len(names) > 1:
+                    raise ValueError("여러 SnapRef 이미지는 캐릭터별 RGB 마스크가 필요합니다")
+                images = {}
+                for index, name in enumerate(names):
+                    entry = next((item for item in entries if str(item.get("CHAR") or "") == name), None)
+                    if entry is None or not entry.get("ipa_path"):
+                        print(f"[SnapRef] Reference path missing; retaining region prompt/LoRA: char={name!r}")
+                        continue
+                    raw_path = str(entry["ipa_path"]).replace("\\", "/")
+                    relative_dir = os.path.dirname(raw_path) if os.path.splitext(raw_path)[1] else raw_path
+                    try:
+                        directory = _safe_mask_directory(relative_dir)
+                    except FileNotFoundError as exc:
+                        print(f"[SnapRef] Reference directory missing; retaining region prompt/LoRA: char={name!r}, path={relative_dir!r}, error={exc}")
+                        traceback.print_exc()
+                        continue
+                    files = sorted(
+                        os.path.join(directory, filename) for filename in os.listdir(directory)
+                        if os.path.splitext(filename)[0].casefold() == "representation"
+                        and os.path.splitext(filename)[1].casefold() in _IMAGE_EXTENSIONS
+                    ) if os.path.isdir(directory) else []
+                    if not files:
+                        print(f"[SnapRef] Representative image missing; retaining region prompt/LoRA: char={name!r}, directory={directory!r}")
+                        continue
+                    filename = os.path.relpath(files[0], folder_paths.get_input_directory()).replace("\\", "/")
+                    images[index + 1] = SoyaRefImageLoader_mdsoya().doit(filename, 1024, 1024)[0]
+                    print(f"[SnapRef] Bound char={name!r} to RGB region={index + 1}, image={filename!r}")
+                if images:
+                    if vae is None:
+                        raise ValueError("SnapRef 참조 이미지 인코딩에 VAE 연결이 필요합니다")
+                    snapref = SnapRef(model, clip, vae, images, _resolve_lora_path(snapref_model),
+                                      snapref_mode, snapref_megapixels, snapref_strength)
+                else:
+                    print("[SnapRef] No representative images available; keeping existing sampler behavior")
             if not payload["enable"]:
                 lora_entries = _parse_lora_entries(LORA_ACT, LORA_DATA)
                 global_model = self._apply_global_loras(model, lora_entries)
+                sampling_model = global_model
+                if snapref is not None:
+                    from .soya_spatial_lora import apply_spatial_loras
+                    size = latent_image["samples"].shape[-2:]
+                    sampling_model = apply_spatial_loras(global_model, [], [torch.ones(1, *size)],
+                                                         [positive], positive, snapref=snapref)
                 print(
                     "[1st sampler] MULTI_CHAR=false · 캐릭터 LoRA 전역 적용 후 "
                     f"{sampler_mode} 실행: loras={len(lora_entries)}"
                 )
                 result = self._sample_selected(
                     sampler_mode,
-                    global_model,
+                    sampling_model,
                     seed,
                     steps,
                     cfg,
@@ -840,6 +913,7 @@ class SoyaFirstSampler_mdsoya:
             regional_model = apply_spatial_loras(
                 model, loaded, masks, spatial_conditionings, background_conditioning,
                 **({"face_tracking": True} if face_tracking else {}),
+                **({"snapref": snapref} if snapref is not None else {}),
             )
             print(
                 "[1st sampler] MULTI_CHAR=true · 공간 LoRA residual + 공유 모델 계산 "
@@ -901,6 +975,7 @@ class SoyaFirstSampler_mdsoya:
             print(
                 f"[1st sampler] 샘플링 실패: mask_location={mask_location!r}, "
                 f"sampler_mode={sampler_mode!r}, "
+                f"SNAPREF={SNAPREF!r}, "
                 f"multi_char_len={len(str(multi_char or ''))}, "
                 f"lora_data_len={len(str(LORA_DATA or ''))}, error={exc}"
             )

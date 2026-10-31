@@ -20,6 +20,49 @@ merge multi-character LoRAs into that model.
 
 ## Shared-pass spatial LoRA
 
+### SnapRef references
+
+The first sampler accepts optional `vae`, `FACE_ID_DIR`, and `SNAPREF`
+inputs. Connect the prompt parser's `FACE_ID_DIR` and `SNAPREF` outputs and the
+Anima VAE. The illustration prompt places one JSON block after `MULTI_CHAR`:
+
+```text
+[SNAPREF]
+{"enabled":true,"strength":-0.5,"mode":"char","megapixels":0.75}
+```
+
+The sampler reads these settings through the saved graph connections. The
+server does not override illustration sampler inputs. The parser also reads
+the four separate blocks in older backups. Unconnected workflows can still use
+the existing individual sampler widgets. `snapref_model` names a separately downloaded
+`snapref_v1a.safetensors` in the LoRA model directory (or its full path).
+
+Asset workflows connect `SoyaAssetV2PromptParser`'s `SNAPREF` output to the same
+sampler input. Their JSON also includes `"dir":"soya_snapref/..."` for the
+selected reference folder; the asset's `FACE_ID_DIR` remains the IPAdapter path.
+The initial Anima sampler is saved as `SoyaFirstSampler` in `KSampler` mode,
+with its original model, conditioning, latent and sampling values. The server
+does not change node types or sampler inputs during a generation request.
+
+Each character uses `representation.*` beside the embedding cache selected by
+`FACE_ID_DIR`, including visual-profile directories. Character names bind these
+images to `MULTI_CHAR.char_name_list` and its RGB mask order. A missing reference
+keeps that region's existing prompt and LoRA. A single global character uses the
+full canvas. Existing workflows default to SnapRef disabled.
+
+`snapref_mode=char` transfers appearance; `cs` also transfers style. Strength
+zero is the trained reference strength. References are resized within
+`snapref_megapixels` while preserving their aspect ratio. Reference K/V attention
+is restricted to the owning positive mask; target scene attention remains global.
+Overlapping masks share the existing normalized weight budget. Anima 28-layer
+and 2.9B 40-layer models use the installed native LoRA remapping path. Reference
+encoding temporarily suspends target Mod Guidance and restores it before sampling.
+
+SnapRef-derived code retains [its upstream license](third_party/SnapRef-LICENSE.md)
+and [notices](third_party/SnapRef-NOTICE.txt). Weights are not bundled with this node.
+
+### Spatial routing
+
 The multi-character path shares the DiT forward across characters. Image-side attention
 and MLP LoRA residuals are multiplied by RGB token masks. Cross-attention K/V
 residuals apply only to the owning character's text slot; positive and negative

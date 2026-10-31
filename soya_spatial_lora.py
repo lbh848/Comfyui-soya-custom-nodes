@@ -18,6 +18,7 @@ import comfy.sd
 import comfy.patcher_extension
 
 from .soya_character_lora import _merged_path_reason
+from .soya_snapref import _masked_reference_attention
 from .anima_regional_conditioning import (
     AnimaConditioningRegionChain,
     AnimaRegionalConditioningPatch,
@@ -88,7 +89,7 @@ def _route_residual(x, output, adapter, role, slot, weights, text_lengths):
 
 
 class _SpatialRuntime:
-    def __init__(self, conditioning, patches, latent_format=None):
+    def __init__(self, conditioning, patches, latent_format=None, snapref=None):
         self.conditioning = conditioning
         self.patches = patches  # CPU adapters, keyed by native model path
         self.prepared = {}
@@ -97,11 +98,14 @@ class _SpatialRuntime:
         self.forward_count = 0
         self.latent_format = latent_format
         self.tracker = None
+        self.snapref = snapref
 
     def clear(self):
         self.prepared.clear()
         self.adapters.clear()
         self.layouts.clear()
+        if self.snapref is not None:
+            self.snapref.clear()
         if self.tracker is not None:
             self.tracker.clear_device_cache()
 
@@ -196,6 +200,7 @@ def _diffusion_wrapper(executor, *args, **kwargs):
         flags = options.get("cond_or_uncond", [0])
         unified, lengths = _unified_context(context, contexts, flags)
         weights, bias = runtime.layout(x.shape[-3:], dit, context.device, context.dtype, lengths)
+        references = runtime.snapref.prepare(dit, x) if runtime.snapref is not None else {}
         for path, entries in runtime.patches.items():
             # Resolve against this execution's diffusion model (also supports
             # model clones); never retain a module or device copy in the node.
@@ -203,10 +208,18 @@ def _diffusion_wrapper(executor, *args, **kwargs):
             handles.append(module.register_forward_hook(
                 partial(runtime.layer_hook, entries, weights, lengths), with_kwargs=True,
             ))
-        for block in dit.blocks:
+        for index, block in enumerate(dit.blocks):
             attention = block.cross_attn
             attention_ops.append((attention, attention.attn_op))
             attention.attn_op = partial(_masked_attn_op, attn_bias=bias)
+            if references:
+                attention = block.self_attn
+                attention_ops.append((attention, attention.attn_op))
+                attention.attn_op = partial(
+                    _masked_reference_attention, attention.attn_op,
+                    {slot: records[index] for slot, records in references.items()},
+                    weights, flags, runtime.snapref.strength,
+                )
         args = list(args)
         if len(args) > 2:
             args[2] = unified
@@ -266,7 +279,7 @@ def _sample_wrapper(executor, *args, **kwargs):
         runtime.clear()
 
 
-def apply_spatial_loras(model, loras, masks, conditionings, background, *, face_tracking=False):
+def apply_spatial_loras(model, loras, masks, conditionings, background, *, face_tracking=False, snapref=None):
     """Return a spatially routed clone; never merge or change incoming weights."""
     try:
         dit = _validate_anima_model(model)
@@ -296,11 +309,17 @@ def apply_spatial_loras(model, loras, masks, conditionings, background, *, face_
             print(f"[spatial LoRA] Registered region={index + 1}, layers={len(native)}, strength={strength}")
         if not loras:
             print("[spatial LoRA] No character adapters; executing regional text conditioning only")
+        if snapref is not None:
+            for path, entries in snapref.adapter.patches["tgt"].items():
+                role = roles[dit.get_submodule(path)]
+                for slot in snapref.refs:
+                    for scale, adapter, _model_scale, _offset, _function in entries:
+                        patches.setdefault(path, []).append((slot, role, scale, adapter))
         regions = [AnimaConditioningRegionChain(None, mask, cond, 1.0) for mask, cond in zip(masks, conditionings)]
         conditioning = AnimaRegionalConditioningPatch(
             regions, "uncovered_only", 1.0, float("inf"), 0.0, 1.0, 0.0, 0.0, 1, 1, background,
         )
-        runtime = _SpatialRuntime(conditioning, patches, model.model.latent_format if face_tracking else None)
+        runtime = _SpatialRuntime(conditioning, patches, model.model.latent_format if face_tracking else None, snapref)
         patched = model.clone()
         patched.model_options.setdefault("transformer_options", {})[_KEY] = runtime
         for kind, wrapper in (

@@ -1,3 +1,7 @@
+import json
+import traceback
+
+
 class SoyaPromptParser_mdsoya:
     """Parses a tagged text block and outputs each field with the correct type."""
 
@@ -41,6 +45,7 @@ class SoyaPromptParser_mdsoya:
         "SEED": "INT",
         # 기존 출력 인덱스를 보존하기 위해 새 필드는 항상 맨 뒤에 둔다.
         "MULTI_CHAR": "STRING",
+        "SNAPREF": "STRING",
     }
 
     @classmethod
@@ -78,6 +83,20 @@ class SoyaPromptParser_mdsoya:
 
         if current_key is not None:
             parsed[current_key] = "\n".join(current_lines).strip()
+
+        # Older illustration backups store four separate control blocks.
+        if "SNAPREF" not in parsed and "SNAPREF_ENABLED" in parsed:
+            try:
+                controls = {"enabled": parsed["SNAPREF_ENABLED"].strip().lower() == "true"}
+                for key, convert in (("strength", float), ("mode", str), ("megapixels", float), ("dir", str)):
+                    legacy_key = "SNAPREF_" + key.upper()
+                    if legacy_key in parsed:
+                        controls[key] = convert(parsed[legacy_key].strip())
+                parsed["SNAPREF"] = json.dumps(controls, ensure_ascii=False)
+            except (TypeError, ValueError) as exc:
+                print(f"[SNAPREF] Legacy controls could not be parsed: controls={parsed!r}, error={exc}")
+                traceback.print_exc()
+                raise
 
         results = []
         for key, dtype in self._FIELDS.items():

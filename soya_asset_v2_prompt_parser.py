@@ -1,4 +1,7 @@
-class SoyaAssetV2PromptParser_mdsoya:
+from .soya_prompt_parser import SoyaPromptParser_mdsoya
+
+
+class SoyaAssetV2PromptParser_mdsoya(SoyaPromptParser_mdsoya):
     """Parses a tagged text block (asset v2 format) and outputs each field with the correct type."""
 
     _FIELDS = {
@@ -43,6 +46,8 @@ class SoyaAssetV2PromptParser_mdsoya:
         "IMG_W": "INT",
         "IMG_H": "INT",
         "SEED": "INT",
+        # Preserve all existing output indices.
+        "SNAPREF": "STRING",
     }
 
     @classmethod
@@ -58,43 +63,3 @@ class SoyaAssetV2PromptParser_mdsoya:
     FUNCTION = "parse"
     CATEGORY = "Soya/Util"
     OUTPUT_NODE = True
-
-    def parse(self, text):
-        parsed = {}
-        current_key = None
-        current_lines = []
-
-        for line in text.split("\n"):
-            line = line.rstrip("\r")
-            stripped = line.strip()
-
-            bracket = stripped.startswith("[") and stripped.endswith("]")
-            if bracket:
-                if current_key is not None:
-                    parsed[current_key] = "\n".join(current_lines).strip()
-                current_key = stripped[1:-1]
-                current_lines = []
-            else:
-                if current_key is not None:
-                    current_lines.append(line)
-
-        if current_key is not None:
-            parsed[current_key] = "\n".join(current_lines).strip()
-
-        results = []
-        for key, dtype in self._FIELDS.items():
-            raw = parsed.get(key, "")
-            if dtype == "INT":
-                try:
-                    results.append(int(raw))
-                except (ValueError, TypeError):
-                    results.append(0)
-            elif dtype == "FLOAT":
-                try:
-                    results.append(float(raw))
-                except (ValueError, TypeError):
-                    results.append(0.0)
-            else:
-                results.append(raw)
-
-        return tuple(results)
