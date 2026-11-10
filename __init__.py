@@ -293,3 +293,13 @@ try:
     _mm_setup()
 except Exception as e:
     print(f"[Soya:ModelManager] Failed to setup routes: {e}")
+
+# BEGIN SOYA ILLUSTRATION V2
+from .soya_illustration_json_v2 import register_illustration_v2
+register_illustration_v2(NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS)
+# END SOYA ILLUSTRATION V2
+
+# BEGIN SOYA GEMMA VISION
+from .soya_gemma4_vision import register_gemma4_vision
+register_gemma4_vision(NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS)
+# END SOYA GEMMA VISION

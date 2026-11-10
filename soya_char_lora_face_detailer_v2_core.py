@@ -1,0 +1,647 @@
+"""
+SoyaCharLoraFaceDetailer – Per-face detailer with character-specific LoRA patches.
+
+For each face in face_context:
+  1. Identify character → find matching LoRA (filtered by base_model)
+  2. Apply ONLY that character's LoRA to a fresh copy of the original model
+  3. Assemble prompt: artist_tags + quality_tags + FACE_TAGS + EYE_TAGS + POSITIVE
+  4. Crop face region from image (VAE-aligned size, crop_expand_factor padding)
+  5. Upscale crop by upscale_factor for higher-resolution processing
+  6. VAE encode → KSampler → VAE decode → downscale back → paste with feathered mask
+"""
+
+import os
+import json
+import math
+import traceback
+import torch
+from .soya_illustration_stages import prepare_detailer_model
+import torch.nn.functional as F
+import numpy as np
+from PIL import Image
+import comfy.sd
+import comfy.utils
+import folder_paths
+
+
+# ── Shared helpers ──────────────────────────────────────────────────
+
+def _resolve_lora_path(lora_path):
+    if os.path.isfile(lora_path):
+        return lora_path
+    try:
+        resolved = folder_paths.get_full_path("loras", lora_path)
+        if resolved and os.path.isfile(resolved):
+            return resolved
+    except Exception:
+        pass
+    try:
+        for base in folder_paths.get_folder_paths("loras"):
+            candidate = os.path.join(base, lora_path)
+            if os.path.isfile(candidate):
+                return candidate
+    except Exception:
+        pass
+    return None
+
+
+def _extract_char_from_path(path, char_names):
+    normalized = path.replace("\\", "/")
+    segments = normalized.split("/")
+    for char_name in char_names:
+        for seg in segments:
+            if seg.startswith(f"{char_name}-") or seg == char_name:
+                return char_name
+    return None
+
+
+def _build_lora_map(filtered_loras, char_names):
+    lora_map = {}
+    for entry in filtered_loras:
+        char = entry.get("CHAR", "").strip()
+        if not char:
+            char = _extract_char_from_path(entry.get("lora_path", ""), char_names)
+        if char and char not in lora_map:
+            lora_map[char] = entry
+    return lora_map
+
+
+def _resolve_upscale_factor(lora_entry, upscale_factor, actual_w, actual_h):
+    """Per-face effective upscale factor.
+
+    UPSCALE_SIZE in the LoRA entry (e.g. "1024") sets the target size of the
+    crop's longest side. Falls back to upscale_factor when missing/empty/invalid
+    or when the crop already meets the target.
+
+    Returns (factor, summary) where summary is a short human-readable string
+    describing the actual decision.
+    """
+    raw = (lora_entry or {}).get("UPSCALE_SIZE", "")
+    if isinstance(raw, (int, float)):
+        target = float(raw)
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            target = float(raw.strip())
+        except ValueError:
+            return upscale_factor, f"factor x{upscale_factor:.2f} (invalid UPSCALE_SIZE={raw!r})"
+    else:
+        return upscale_factor, f"factor x{upscale_factor:.2f} (no UPSCALE_SIZE)"
+
+    if target <= 0:
+        return upscale_factor, f"factor x{upscale_factor:.2f} (invalid UPSCALE_SIZE={target})"
+
+    longest = float(max(actual_w, actual_h))
+    if longest <= 0:
+        return upscale_factor, f"factor x{upscale_factor:.2f} (degenerate crop)"
+
+    size_factor = target / longest
+    if size_factor <= 1.0:
+        return 1.0, f"target {int(target)}px SKIPPED (longest side {int(longest)}px already >= target)"
+    return size_factor, f"target {int(target)}px longest → x{size_factor:.3f} (from {int(longest)}px)"
+
+
+def _get_vae_spatial_compression(vae):
+    """Return the VAE's required spatial multiple with explicit diagnostics."""
+    try:
+        compression = int(vae.spacial_compression_encode())
+        if compression < 1:
+            raise ValueError(
+                f"invalid VAE spatial compression ratio: {compression}"
+            )
+        return compression
+    except Exception as exc:
+        print(
+            "[SoyaCharLoraFaceDetailer] FAILED to resolve VAE spatial "
+            f"compression: vae={type(vae).__name__}, error={exc}"
+        )
+        traceback.print_exc()
+        raise
+
+
+def _round_up_to_multiple(value, multiple):
+    return ((int(value) + multiple - 1) // multiple) * multiple
+
+
+def _fit_vae_crop_bounds(
+    cr_x1,
+    cr_y1,
+    cr_x2,
+    cr_y2,
+    image_w,
+    image_h,
+    crop_expand_factor,
+    spatial_compression,
+):
+    """Fit a VAE-aligned crop inside the image without resizing it.
+
+    Only the crop dimensions need to be aligned. When a centered crop crosses an
+    image edge, the whole window is shifted inward so its aligned size is kept.
+    """
+    if spatial_compression < 1:
+        raise ValueError(
+            f"spatial_compression must be positive, got {spatial_compression}"
+        )
+    if image_w < spatial_compression or image_h < spatial_compression:
+        raise ValueError(
+            "image is smaller than one VAE spatial block: "
+            f"image={image_w}x{image_h}, compression={spatial_compression}"
+        )
+
+    cr_w = cr_x2 - cr_x1
+    cr_h = cr_y2 - cr_y1
+    if cr_w <= 0 or cr_h <= 0:
+        raise ValueError(
+            "face crop must have positive dimensions: "
+            f"crop=({cr_x1},{cr_y1},{cr_x2},{cr_y2})"
+        )
+
+    requested_w = max(
+        spatial_compression,
+        _round_up_to_multiple(cr_w * crop_expand_factor, spatial_compression),
+    )
+    requested_h = max(
+        spatial_compression,
+        _round_up_to_multiple(cr_h * crop_expand_factor, spatial_compression),
+    )
+
+    crop_w = min(
+        requested_w,
+        (image_w // spatial_compression) * spatial_compression,
+    )
+    crop_h = min(
+        requested_h,
+        (image_h // spatial_compression) * spatial_compression,
+    )
+
+    def fit_axis(face_start, face_end, image_size, crop_size):
+        centered_start = math.floor(
+            ((face_start + face_end) / 2.0) - (crop_size / 2.0)
+        )
+        max_start = image_size - crop_size
+
+        # Preserve the visible face region whenever it fits in the crop. These
+        # bounds also shift edge crops inward without shrinking their size.
+        visible_start = max(0, min(image_size, face_start))
+        visible_end = max(0, min(image_size, face_end))
+        lower = max(0, visible_end - crop_size)
+        upper = min(max_start, visible_start)
+        if lower <= upper:
+            start = min(max(centered_start, lower), upper)
+        else:
+            start = min(max(centered_start, 0), max_start)
+        return int(start), int(start + crop_size)
+
+    cx1, cx2 = fit_axis(cr_x1, cr_x2, image_w, crop_w)
+    cy1, cy2 = fit_axis(cr_y1, cr_y2, image_h, crop_h)
+    return cx1, cy1, cx2, cy2
+
+
+def _parse_inputs(char_tags, lora_list, base_model):
+    char_data = json.loads(char_tags).get("list", [])
+    lora_data = json.loads(lora_list).get("list", [])
+
+    char_map = {}
+    char_names = []
+    for entry in char_data:
+        name = entry.get("CHAR", "").strip()
+        if name:
+            char_map[name] = {
+                "FACE_TAGS": entry.get("FACE_TAGS", ""),
+                "EYE_TAGS": entry.get("EYE_TAGS", ""),
+                "POSITIVE": entry.get("POSITIVE", ""),
+                "TRIGGER_ANIMA": entry.get("TRIGGER_ANIMA", ""),
+                "TRIGGER_SDXL": entry.get("TRIGGER_SDXL", ""),
+            }
+            char_names.append(name)
+
+    filtered_loras = [l for l in lora_data if l.get("BASE", "").strip() == base_model.strip()]
+    lora_map = _build_lora_map(filtered_loras, char_names)
+
+    return char_map, char_names, lora_map, len(lora_data), len(filtered_loras)
+
+
+def _compute_info(face_context, char_tags, quality_tags, artist_tags,
+                  lora_list, base_model):
+    char_map, char_names, lora_map, total_loras, filtered_loras = \
+        _parse_inputs(char_tags, lora_list, base_model)
+
+    lines = [
+        f"Base model: {base_model}",
+        f"LoRAs: {filtered_loras} matched / {total_loras} total",
+        f"Characters: {', '.join(char_names) or '(none)'}",
+        "─" * 50,
+    ]
+
+    if not face_context or not face_context.get("matches"):
+        lines.append("No faces in face_context")
+        return "\n".join(lines)
+
+    matches = face_context["matches"]
+    lines.append(f"Detected faces: {len(matches)}")
+    lines.append("─" * 50)
+
+    for i, match in enumerate(matches):
+        name = match["name"]
+        crop = match["crop"]
+        score = match["score"]
+
+        if name == "unknown":
+            lines.append(f"Face {i + 1}: unknown (score: {score:.4f}) — SKIPPED")
+            continue
+
+        tags = char_map.get(name, {})
+        face_tags = tags.get("FACE_TAGS", "")
+        eye_tags = tags.get("EYE_TAGS", "")
+        positive_tags = tags.get("POSITIVE", "")
+        trigger_key = "TRIGGER_ANIMA" if base_model.strip() == "anima" else "TRIGGER_SDXL"
+        trigger = tags.get(trigger_key, "").strip()
+        parts = [p for p in [trigger, artist_tags, quality_tags, face_tags, eye_tags, positive_tags] if p.strip()]
+        prompt = ", ".join(parts)
+
+        lora_entry = lora_map.get(name)
+        lines.append(f"Face {i + 1}: {name}")
+        lines.append(f"  Score: {score:.4f}")
+        lines.append(f"  Crop: {crop}")
+        if lora_entry:
+            lines.append(f"  LoRA: {os.path.basename(lora_entry['lora_path'])} @ {lora_entry.get('str', 1.0)}")
+        else:
+            lines.append("  LoRA: NOT FOUND")
+        lines.append(f"  Prompt: {prompt}")
+
+    return "\n".join(lines)
+
+
+# ── GPU helpers ─────────────────────────────────────────────────────
+
+def _gaussian_blur_gpu(mask, sigma):
+    ksize = int(6 * sigma + 1)
+    if ksize % 2 == 0:
+        ksize += 1
+
+    x = torch.arange(ksize, dtype=torch.float32, device=mask.device) - ksize // 2
+    kernel = torch.exp(-x ** 2 / (2 * sigma ** 2))
+    kernel = kernel / kernel.sum()
+
+    mask_4d = mask.unsqueeze(0).unsqueeze(0)
+    pad = ksize // 2
+
+    padded = F.pad(mask_4d, [pad, pad, 0, 0], mode='reflect')
+    blurred = F.conv2d(padded, kernel.view(1, 1, 1, -1))
+
+    padded = F.pad(blurred, [0, 0, pad, pad], mode='reflect')
+    blurred = F.conv2d(padded, kernel.view(1, 1, -1, 1))
+
+    return blurred.squeeze(0).squeeze(0)
+
+
+def _encode_conditioning(clip, text):
+    from nodes import CLIPTextEncode
+    return CLIPTextEncode().encode(clip, text)[0]
+
+
+def _run_ksampler(model, seed, steps, cfg, sampler_name, scheduler,
+                  positive, negative, latent_dict, denoise):
+    from nodes import common_ksampler
+    result = common_ksampler(
+        model, seed, steps, cfg, sampler_name, scheduler,
+        positive, negative, latent_dict, denoise=denoise,
+    )
+    return result[0]["samples"]
+
+
+def _compute_voronoi_zones(matches, H, W):
+    """Compute per-face Voronoi ownership masks (each pixel assigned to nearest face center)."""
+    if not matches:
+        return []
+
+    centers = []
+    for m in matches:
+        crop = m["crop"]
+        centers.append(((crop[0] + crop[2]) / 2.0, (crop[1] + crop[3]) / 2.0))
+
+    if len(centers) == 1:
+        mask = torch.ones((H, W), dtype=torch.float32)
+        return [mask]
+
+    # Bounding box of all face regions for efficiency
+    all_x1 = [int(m["crop"][0]) for m in matches]
+    all_y1 = [int(m["crop"][1]) for m in matches]
+    all_x2 = [int(m["crop"][2]) for m in matches]
+    all_y2 = [int(m["crop"][3]) for m in matches]
+    bx1, by1 = max(0, min(all_x1)), max(0, min(all_y1))
+    bx2, by2 = min(W, max(all_x2)), min(H, max(all_y2))
+
+    yy, xx = torch.meshgrid(
+        torch.arange(by1, by2, dtype=torch.float32),
+        torch.arange(bx1, bx2, dtype=torch.float32),
+        indexing='ij'
+    )
+
+    nearest = torch.zeros_like(xx, dtype=torch.long)
+    min_dist = torch.full_like(xx, float('inf'))
+    for i, (cx, cy) in enumerate(centers):
+        dist = (xx - cx) ** 2 + (yy - cy) ** 2
+        closer = dist < min_dist
+        nearest[closer] = i
+        min_dist[closer] = dist[closer]
+
+    masks = []
+    for i in range(len(matches)):
+        mask = torch.zeros((H, W), dtype=torch.float32)
+        mask[by1:by2, bx1:bx2] = (nearest == i).float()
+        masks.append(mask)
+    return masks
+
+
+# ── Main Face Detailer Node ────────────────────────────────────────
+
+class SoyaCharLoraFaceDetailer_mdsoya:
+    @classmethod
+    def INPUT_TYPES(cls):
+        import comfy.samplers
+        return {
+            "required": {
+                "enable": ("STRING", {"default": "true"}),
+                "image": ("IMAGE",),
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+                "vae": ("VAE",),
+                "face_context": ("IPA_FACE_CONTEXT",),
+                "char_tags": ("STRING", {"multiline": True, "default": '{"list":[{"CHAR":"name","FACE_TAGS":"face tags","EYE_TAGS":"eye tags","POSITIVE":"positive tags"}]}'}),
+                "quality_tags": ("STRING", {"default": ""}),
+                "artist_tags": ("STRING", {"default": ""}),
+                "negative": ("STRING", {"multiline": True, "default": ""}),
+                "lora_list": ("STRING", {"multiline": True, "default": '{"list":[{"CHAR":"name","lora_path":"filename.safetensors","str":1.0,"BASE":"anima"}]}'}),
+                "base_model": ("STRING", {"default": "anima"}),
+                "crop_expand_factor": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 4.0, "step": 0.1}),
+                "upscale_factor": ("FLOAT", {"default": 1.2, "min": 1.0, "max": 4.0, "step": 0.05}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+                "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step": 0.1}),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
+                "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
+                "denoise": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "feather": ("INT", {"default": 5, "min": 0, "max": 100}),
+                "corner_roundness": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "noise_mask": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "STRING")
+    RETURN_NAMES = ("image", "mask", "crop_preview", "info")
+    FUNCTION = "execute"
+    CATEGORY = "Soya/FaceDetailer"
+
+    def execute(self, *, enable, image, model, clip, vae, face_context,
+                char_tags, quality_tags, artist_tags, negative,
+                lora_list, base_model,
+                crop_expand_factor, upscale_factor, seed, steps, cfg, sampler_name, scheduler,
+                denoise, feather, corner_roundness, noise_mask,
+                _reference_images=None, _reference_settings=None):
+
+        B, H, W, C = image.shape
+        use = enable.strip().lower() in ("true", "1", "yes")
+
+        if not use:
+            return (image, torch.zeros((B, H, W), dtype=torch.float32),
+                    torch.zeros_like(image),
+                    "DISABLED")
+
+        char_map, char_names, lora_map, _, _ = \
+            _parse_inputs(char_tags, lora_list, base_model)
+
+        if not face_context or not face_context.get("matches"):
+            return (image, torch.zeros((B, H, W), dtype=torch.float32),
+                    torch.zeros_like(image),
+                    "No faces in face_context")
+
+        matches = face_context["matches"]
+        result_image = image.clone()
+        combined_mask = torch.zeros((B, H, W), dtype=torch.float32)
+        crop_region = torch.zeros((B, H, W), dtype=torch.float32)
+        log_lines = []
+        spatial_compression = _get_vae_spatial_compression(vae)
+
+        # Encode negative once (shared across all faces)
+        negative_cond = _encode_conditioning(clip, negative)
+
+        # Compute Voronoi zones so overlapping faces get unique regions
+        voronoi_masks = _compute_voronoi_zones(matches, H, W)
+
+        for batch_idx in range(B):
+            for match_idx, match in enumerate(matches):
+                name = match["name"]
+                crop = match["crop"]
+
+                if name == "unknown":
+                    log_lines.append(f"  unknown — SKIPPED")
+                    continue
+
+                if name not in char_map:
+                    log_lines.append(f"  {name} — NO TAGS, SKIPPED")
+                    continue
+
+                # ── LoRA: always start from original model ──────
+                lora_entry = lora_map.get(name)
+                patched_model = model
+                lora_info = "none"
+
+                if lora_entry:
+                    resolved = _resolve_lora_path(lora_entry["lora_path"])
+                    if resolved:
+                        lora_loaded = comfy.utils.load_torch_file(resolved, safe_load=True)
+                        strength = float(lora_entry.get("str", 1.0))
+                        patched_model, _ = comfy.sd.load_lora_for_models(
+                            model, clip, lora_loaded, strength, 0.0
+                        )
+                        lora_info = f"{os.path.basename(resolved)} @ {strength}"
+                    else:
+                        lora_info = f"FILE NOT FOUND: {lora_entry['lora_path']}"
+
+                # ── Tags & prompt ───────────────────────────────
+                tags = char_map[name]
+                face_tags = tags["FACE_TAGS"]
+                eye_tags = tags["EYE_TAGS"]
+                positive_tags = tags["POSITIVE"]
+                trigger_key = "TRIGGER_ANIMA" if base_model.strip() == "anima" else "TRIGGER_SDXL"
+                trigger = tags.get(trigger_key, "").strip()
+                parts = [p for p in [trigger, artist_tags, quality_tags, face_tags, eye_tags, positive_tags] if p.strip()]
+                prompt = ", ".join(parts)
+
+                positive_cond = _encode_conditioning(clip, prompt)
+
+                # ── Crop region from face_context (expanded with CROP_TOP/BOTTOM) ──
+                cr_x1, cr_y1, cr_x2, cr_y2 = int(crop[0]), int(crop[1]), int(crop[2]), int(crop[3])
+                cr_w, cr_h = cr_x2 - cr_x1, cr_y2 - cr_y1
+                cr_cx, cr_cy = (cr_x1 + cr_x2) / 2.0, (cr_y1 + cr_y2) / 2.0
+
+                if cr_w <= 0 or cr_h <= 0:
+                    message = (
+                        f"{name} — invalid face crop "
+                        f"({cr_x1},{cr_y1},{cr_x2},{cr_y2})"
+                    )
+                    print(f"[SoyaCharLoraFaceDetailer] SKIPPED: {message}")
+                    log_lines.append(f"  {message}")
+                    continue
+
+                # Keep the final crop dimensions aligned to the actual VAE.
+                # At image edges, shift the crop inward instead of clamping and
+                # shrinking it to a non-aligned size.
+                cx1, cy1, cx2, cy2 = _fit_vae_crop_bounds(
+                    cr_x1,
+                    cr_y1,
+                    cr_x2,
+                    cr_y2,
+                    W,
+                    H,
+                    crop_expand_factor,
+                    spatial_compression,
+                )
+                actual_w, actual_h = cx2 - cx1, cy2 - cy1
+
+                # ── Crop from original image ──
+                crop_tensor = image[batch_idx, cy1:cy2, cx1:cx2].clone()
+
+                # ── Mask from crop region (superellipse = rounded rectangle) ──
+                # corner_roundness: 0=rectangle, 1=ellipse
+                # Internally maps to superellipse exponent: n = 2/max(t, 0.01)
+                #   t=0   → hard rectangle
+                #   t=0.25 → n=8 (subtle rounding)
+                #   t=0.5 → n=4 (squircle)
+                #   t=1.0 → n=2 (ellipse)
+                # Map original crop coords to process_crop local space (no scaling)
+                local_cx = cr_cx - cx1
+                local_cy = cr_cy - cy1
+                local_hw = max(1.0, (cr_x2 - cr_x1) / 2.0)
+                local_hh = max(1.0, (cr_y2 - cr_y1) / 2.0)
+
+                if corner_roundness <= 0.0:
+                    local_x1 = max(0, int(cr_x1 - cx1))
+                    local_y1 = max(0, int(cr_y1 - cy1))
+                    local_x2 = min(actual_w, int(cr_x2 - cx1))
+                    local_y2 = min(actual_h, int(cr_y2 - cy1))
+                    mask = torch.zeros((actual_h, actual_w), dtype=torch.float32)
+                    if local_x2 > local_x1 and local_y2 > local_y1:
+                        mask[local_y1:local_y2, local_x1:local_x2] = 1.0
+                else:
+                    n = 2.0 / max(corner_roundness, 0.01)
+                    yy, xx = torch.meshgrid(
+                        torch.arange(actual_h, dtype=torch.float32),
+                        torch.arange(actual_w, dtype=torch.float32),
+                        indexing='ij'
+                    )
+                    nx = (xx - local_cx) / local_hw
+                    ny = (yy - local_cy) / local_hh
+                    superellipse = (nx.abs() ** n + ny.abs() ** n)
+                    mask = (superellipse <= 1.0).float()
+
+                # Intersect with Voronoi zone (only pixels owned by this face)
+                if voronoi_masks:
+                    voronoi_crop = voronoi_masks[match_idx][cy1:cy2, cx1:cx2]
+                    mask = mask * voronoi_crop
+
+                if feather > 0:
+                    mask = _gaussian_blur_gpu(mask, feather)
+
+                # ── Resolve effective upscale (per-face UPSCALE_SIZE override) ──
+                eff_upscale, upscale_info = _resolve_upscale_factor(
+                    lora_entry, upscale_factor, actual_w, actual_h
+                )
+
+                # ── Upscale for processing ──
+                if eff_upscale > 1.0:
+                    process_w = _round_up_to_multiple(
+                        actual_w * eff_upscale, spatial_compression
+                    )
+                    process_h = _round_up_to_multiple(
+                        actual_h * eff_upscale, spatial_compression
+                    )
+
+                    crop_pil = Image.fromarray((crop_tensor.cpu().numpy() * 255).astype(np.uint8))
+                    crop_pil = crop_pil.resize((process_w, process_h), Image.Resampling.LANCZOS)
+                    crop_tensor = torch.from_numpy(np.array(crop_pil).astype(np.float32) / 255.0)
+                    crop_tensor = crop_tensor.unsqueeze(0)  # (1, process_h, process_w, C)
+
+                    mask_pil = Image.fromarray((mask.cpu().numpy() * 255).astype(np.uint8))
+                    mask_pil = mask_pil.resize((process_w, process_h), Image.Resampling.LANCZOS)
+                    process_mask = torch.from_numpy(np.array(mask_pil).astype(np.float32) / 255.0)
+                    mask_batch = process_mask.unsqueeze(0)
+                else:
+                    process_w, process_h = actual_w, actual_h
+                    crop_tensor = crop_tensor.unsqueeze(0)  # (1, actual_h, actual_w, C)
+                    mask_batch = mask.unsqueeze(0)
+
+                # ── VAE encode → KSampler → VAE decode ──
+                latent = vae.encode(crop_tensor[:, :, :, :3])
+                latent_dict = {"samples": latent}
+                if noise_mask:
+                    latent_dict["noise_mask"] = mask_batch
+
+                if _reference_images and base_model.strip() == "anima":
+                    patched_model = prepare_detailer_model(
+                        patched_model, clip, vae, positive_cond, mask_batch, name,
+                        _reference_images, _reference_settings,
+                    )
+                refined_latent = _run_ksampler(
+                    patched_model, seed, steps, cfg,
+                    sampler_name, scheduler,
+                    positive_cond, negative_cond, latent_dict, denoise,
+                )
+                enhanced = vae.decode(refined_latent)
+
+                # ── Downscale back to target size ──
+                # vae.decode returns (B, H, W, C); squeeze batch dim
+                enhanced_crop = enhanced[0].clamp(0, 1)
+                while enhanced_crop.dim() > 3:
+                    enhanced_crop = enhanced_crop[0]
+
+                if eff_upscale > 1.0 and (enhanced_crop.shape[1] != actual_w or enhanced_crop.shape[0] != actual_h):
+                    enhanced_np = (enhanced_crop.cpu().numpy() * 255).astype(np.uint8)
+                    enhanced_pil = Image.fromarray(enhanced_np)
+                    enhanced_pil = enhanced_pil.resize((actual_w, actual_h), Image.Resampling.LANCZOS)
+                    enhanced_crop = torch.from_numpy(np.array(enhanced_pil).astype(np.float32) / 255.0)
+
+                if (
+                    enhanced_crop.shape[0] != actual_h
+                    or enhanced_crop.shape[1] != actual_w
+                ):
+                    message = (
+                        "VAE output size does not match the aligned crop: "
+                        f"crop={actual_w}x{actual_h}, "
+                        f"output={enhanced_crop.shape[1]}x{enhanced_crop.shape[0]}, "
+                        f"compression={spatial_compression}, "
+                        f"bounds=({cx1},{cy1},{cx2},{cy2})"
+                    )
+                    print(f"[SoyaCharLoraFaceDetailer] FAILED: {message}")
+                    raise RuntimeError(message)
+
+                # ── Paste back with feathered mask ──
+                alpha = mask.unsqueeze(-1)
+                result_image[batch_idx, cy1:cy2, cx1:cx2] = (
+                    alpha * enhanced_crop
+                    + (1 - alpha) * result_image[batch_idx, cy1:cy2, cx1:cx2]
+                )
+                combined_mask[batch_idx, cy1:cy2, cx1:cx2] = torch.maximum(
+                    combined_mask[batch_idx, cy1:cy2, cx1:cx2], mask
+                )
+                crop_region[batch_idx, cy1:cy2, cx1:cx2] = 1.0
+
+                log_lines.append(
+                    f"  {name} | LoRA: {lora_info} | "
+                    f"original_crop:({cr_x1},{cr_y1},{cr_x2},{cr_y2}) | "
+                    f"process_crop:({cx1},{cy1},{cx2},{cy2}) | "
+                    f"crop: {actual_w}x{actual_h} → process: {process_w}x{process_h} | "
+                    f"upscale: {upscale_info} | "
+                    f"Prompt: {prompt}"
+                )
+                seed += 1
+
+        info = _compute_info(
+            face_context, char_tags, quality_tags, artist_tags,
+            lora_list, base_model,
+        )
+        info += "\n" + "═" * 50 + "\nProcessing log:\n" + "\n".join(log_lines)
+        # crop_preview: expanded crop area (bright) + superellipse mask (highlight)
+        crop_preview = image * (crop_region * 0.3 + combined_mask * 0.7).unsqueeze(-1)
+        print(f"[CharLoraFaceDetailer] Processed {len(matches)} faces")
+        return (result_image, combined_mask, crop_preview, info)

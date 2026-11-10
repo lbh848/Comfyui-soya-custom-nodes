@@ -1,0 +1,1001 @@
+"""Stock/Spectrum sampling with shared-pass, spatially routed Anima LoRAs."""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import threading
+import traceback
+from collections import OrderedDict
+
+import comfy.samplers
+import comfy.sd
+import comfy.utils
+import folder_paths
+import numpy as np
+import torch
+import torch.nn.functional as F
+from PIL import Image
+from .soya_ref_image_loader import SoyaRefImageLoader_mdsoya
+
+from .soya_spectrum_mod_guidance import (
+    _SPECTRUM_MOD_OPTIONS_TYPE,
+    SoyaSpectrumModGuidanceOptions_mdsoya,
+    sample_spectrum_mod_guidance,
+)
+
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+_MAX_LORA_CACHE_ENTRIES = 8
+_SAMPLER_MODE_KSAMPLER = "KSampler"
+_SAMPLER_MODE_FAST = "FAST"
+_SAMPLER_MODE_SPECTRUM_MOD_GUIDANCE = "SpectrumKSamplerModGuidance"
+_SAMPLER_MODES = [
+    _SAMPLER_MODE_KSAMPLER,
+    _SAMPLER_MODE_FAST,
+    _SAMPLER_MODE_SPECTRUM_MOD_GUIDANCE,
+]
+
+
+def _parse_enabled(value, field_name):
+    if isinstance(value, bool):
+        return value
+    normalized = str(value or "").strip().casefold()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"", "false", "0", "no", "off"}:
+        return False
+    raise ValueError(f"{field_name} 값이 boolean 문자열이 아닙니다: {value!r}")
+
+
+def _resolve_lora_path(lora_path):
+    raw = str(lora_path or "").strip()
+    if not raw:
+        raise ValueError("LoRA 경로가 비어 있습니다")
+    # 워크플로우에는 Windows 경로 구분자가 저장될 수 있지만 Modal 컨테이너는
+    # Linux에서 실행된다. folder_paths에 넘기기 전에 이식 가능한 형식으로 맞춘다.
+    normalized = raw.replace("\\", "/")
+    if os.path.isfile(normalized):
+        return os.path.realpath(normalized)
+    try:
+        resolved = folder_paths.get_full_path("loras", normalized)
+        if resolved and os.path.isfile(resolved):
+            return os.path.realpath(resolved)
+    except Exception as exc:
+        print(f"[1st sampler] folder_paths LoRA 경로 조회 실패: path={raw!r}, error={exc}")
+        traceback.print_exc()
+    for base in folder_paths.get_folder_paths("loras"):
+        candidate = os.path.join(base, normalized)
+        if os.path.isfile(candidate):
+            return os.path.realpath(candidate)
+    raise FileNotFoundError(f"LoRA 파일을 찾지 못했습니다: {raw}")
+
+
+def _parse_lora_entries(lora_activate, lora_data, character_names=None):
+    if not _parse_enabled(lora_activate, "LORA_ACT"):
+        print("[1st sampler] LORA_ACT=false · 캐릭터 LoRA 적용 생략")
+        return []
+    if isinstance(lora_data, dict):
+        payload = lora_data
+    else:
+        try:
+            payload = json.loads(str(lora_data or ""))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"LORA_DATA JSON 파싱 실패: {exc}") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("list"), list):
+        raise ValueError("LORA_DATA는 list 배열을 가진 JSON object여야 합니다")
+
+    expected = None
+    expected_lookup = None
+    if character_names is not None:
+        expected = [str(name or "").strip() for name in character_names]
+        expected_lookup = {name.casefold(): name for name in expected}
+
+    entries = []
+    for index, raw_entry in enumerate(payload["list"]):
+        if not isinstance(raw_entry, dict):
+            raise ValueError(f"LORA_DATA.list[{index}]가 object가 아닙니다")
+        base = str(raw_entry.get("BASE") or "").strip()
+        if base.casefold() != "anima":
+            continue
+        path = str(raw_entry.get("lora_path") or "").strip()
+        if not path:
+            raise ValueError(f"LORA_DATA.list[{index}].lora_path가 비어 있습니다")
+        try:
+            strength = float(raw_entry.get("str", 1.0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"LORA_DATA.list[{index}].str이 숫자가 아닙니다: {raw_entry.get('str')!r}"
+            ) from exc
+        if not math.isfinite(strength):
+            raise ValueError(f"LORA_DATA.list[{index}].str이 유한수가 아닙니다: {strength!r}")
+        if strength == 0.0:
+            print(f"[1st sampler] strength=0 LoRA 생략: index={index}, path={path}")
+            continue
+        entries.append({
+            "source_index": index,
+            "lora_path": path,
+            "strength": strength,
+            "character": str(raw_entry.get("CHAR") or "").strip(),
+        })
+
+    if not entries:
+        print("[1st sampler] 활성화된 Anima 캐릭터 LoRA가 없어 LoRA 적용 생략")
+        return []
+    if expected is None:
+        return entries
+
+    has_character = [bool(entry["character"]) for entry in entries]
+    if not any(has_character):
+        if len(entries) != len(expected):
+            raise ValueError(
+                "구버전 LORA_DATA에 CHAR가 없고 Anima LoRA 수가 캐릭터 수와 다릅니다: "
+                f"loras={len(entries)}, characters={len(expected)}"
+            )
+        print(
+            "[1st sampler] 구버전 LORA_DATA 호환: CHAR가 없어 1인당 1개 LoRA를 "
+            f"캐릭터 순서대로 매핑합니다: order={expected}"
+        )
+        for entry, name in zip(entries, expected):
+            entry["character"] = name
+        return entries
+    if not all(has_character):
+        raise ValueError("LORA_DATA의 Anima LoRA 일부에만 CHAR가 있습니다")
+
+    for entry in entries:
+        key = entry["character"].casefold()
+        if key not in expected_lookup:
+            raise ValueError(
+                f"LORA_DATA에 MULTI_CHAR에 없는 CHAR가 있습니다: {entry['character']!r}"
+            )
+        entry["character"] = expected_lookup[key]
+    return entries
+
+
+def _as_prompt_parts(value, field_name):
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, list):
+        parts = []
+        for index, item in enumerate(value):
+            if not isinstance(item, str):
+                raise ValueError(f"{field_name}[{index}]가 문자열이 아닙니다")
+            if item.strip():
+                parts.append(item.strip())
+        return parts
+    raise ValueError(f"{field_name}는 문자열 또는 문자열 배열이어야 합니다")
+
+
+def _parse_multi_char(value):
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return {"enable": False}
+    if isinstance(value, dict):
+        payload = value
+    else:
+        try:
+            payload = json.loads(str(value))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"MULTI_CHAR JSON 파싱 실패: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("MULTI_CHAR 루트가 object가 아닙니다")
+    enable = payload.get("enable", False)
+    if not isinstance(enable, bool):
+        raise ValueError(f"MULTI_CHAR.enable은 boolean이어야 합니다: {enable!r}")
+    if not enable:
+        return {"enable": False}
+
+    try:
+        char_num = int(payload.get("char_num"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"MULTI_CHAR.char_num이 정수가 아닙니다: {payload.get('char_num')!r}") from exc
+    if not 1 <= char_num <= 3:
+        raise ValueError(f"MULTI_CHAR는 1~3명만 지원합니다: {char_num}")
+
+    names = payload.get("char_name_list")
+    char_inform = payload.get("char_inform")
+    trigger_groups = payload.get("char_trigger_list")
+    char_composition = payload.get("char_composition_list")
+    if "char_composition_list" in payload and (not isinstance(char_composition, list) or len(char_composition) != char_num
+            or any(not isinstance(value, str) for value in char_composition)):
+        raise ValueError("MULTI_CHAR.char_composition_list must contain one prompt per character")
+    if not isinstance(names, list) or len(names) != char_num:
+        raise ValueError("MULTI_CHAR.char_name_list 길이가 char_num과 다릅니다")
+    if not isinstance(char_inform, list) or len(char_inform) != char_num:
+        raise ValueError("MULTI_CHAR.char_inform 길이가 char_num과 다릅니다")
+    if not isinstance(trigger_groups, list) or len(trigger_groups) != char_num:
+        raise ValueError("MULTI_CHAR.char_trigger_list 길이가 char_num과 다릅니다")
+
+    clean_names = []
+    clean_inform = []
+    clean_triggers = []
+    seen = set()
+    for index in range(char_num):
+        name = str(names[index] or "").strip()
+        info = str(char_inform[index] or "").strip()
+        if not name or name.casefold() in seen:
+            raise ValueError(f"MULTI_CHAR 캐릭터 이름이 비었거나 중복됩니다: {name!r}")
+        if not info and not (char_composition and char_composition[index].strip()):
+            raise ValueError(f"MULTI_CHAR.char_inform[{index}]가 비어 있습니다")
+        seen.add(name.casefold())
+        clean_names.append(name)
+        clean_inform.append(info)
+        clean_triggers.append(_as_prompt_parts(
+            trigger_groups[index],
+            f"MULTI_CHAR.char_trigger_list[{index}]",
+        ))
+
+    shared = payload.get("shared_tag")
+    if not isinstance(shared, dict):
+        raise ValueError("MULTI_CHAR.shared_tag가 object가 아닙니다")
+    background_prompt = payload.get("background_prompt", "")
+    if background_prompt is None:
+        background_prompt = ""
+    if not isinstance(background_prompt, str):
+        raise ValueError("MULTI_CHAR.background_prompt는 문자열이어야 합니다")
+    composition_prompt = payload.get("composition_prompt", "")
+    if not isinstance(composition_prompt, str):
+        raise ValueError("MULTI_CHAR.composition_prompt는 문자열이어야 합니다")
+    composition_prompt = composition_prompt.strip()
+    if not composition_prompt and char_composition is None:
+        raise ValueError("MULTI_CHAR.composition_prompt가 비어 있습니다")
+    mask_fingerprint = str(payload.get("mask_fingerprint") or "").strip().casefold()
+    if len(mask_fingerprint) != 64 or any(
+        character not in "0123456789abcdef" for character in mask_fingerprint
+    ):
+        raise ValueError("MULTI_CHAR.mask_fingerprint는 SHA-256 hex 문자열이어야 합니다")
+    try:
+        mask_render_version = int(payload.get("mask_render_version") or 1)
+    except (TypeError, ValueError) as exc:
+        print(f"[1st sampler] Invalid optional mask version; retaining legacy behavior: {exc}")
+        traceback.print_exc()
+        mask_render_version = 1
+    return {
+        "enable": True,
+        "mask_render_version": mask_render_version,
+        "panels": payload.get("panels") or [],
+        "char_num": char_num,
+        "char_name_list": clean_names,
+        "char_inform": clean_inform,
+        "char_trigger_list": clean_triggers,
+        "background_trigger_list": _as_prompt_parts(
+            payload.get("background_trigger_list", []),
+            "MULTI_CHAR.background_trigger_list",
+        ),
+        "shared_before": _as_prompt_parts(shared.get("before_char", []), "shared_tag.before_char"),
+        "shared_after": _as_prompt_parts(shared.get("after_char", []), "shared_tag.after_char"),
+        "background_prompt": background_prompt.strip(),
+        "composition_prompt": composition_prompt,
+        "char_composition_list": ([value.strip() for value in char_composition]
+                                  if char_composition is not None else [composition_prompt] * char_num),
+        "mask_fingerprint": mask_fingerprint,
+    }
+
+
+def _safe_mask_directory(mask_location):
+    input_root = os.path.realpath(os.path.abspath(folder_paths.get_input_directory()))
+    relative = str(mask_location or "region_mask").strip() or "region_mask"
+    target = os.path.realpath(os.path.abspath(os.path.join(input_root, relative)))
+    try:
+        inside_root = os.path.commonpath([input_root, target]) == input_root
+    except ValueError as exc:
+        raise ValueError(f"mask_location이 ComfyUI input과 다른 드라이브입니다: {relative!r}") from exc
+    if not inside_root or target == input_root:
+        raise ValueError(f"mask_location이 ComfyUI input 폴더 밖을 가리킵니다: {relative!r}")
+    if not os.path.isdir(target):
+        raise FileNotFoundError(f"마스크 폴더가 없습니다: {target}")
+    return target
+
+
+def _load_channel_masks(mask_location, char_num):
+    directory = _safe_mask_directory(mask_location)
+    images = sorted(
+        entry.path
+        for entry in os.scandir(directory)
+        if entry.is_file(follow_symlinks=False)
+        and os.path.splitext(entry.name)[1].lower() in _IMAGE_EXTENSIONS
+    )
+    if not images:
+        raise FileNotFoundError(f"마스크 이미지가 없습니다: {directory}")
+    if len(images) > 1:
+        print(f"[1st sampler] 마스크 이미지가 {len(images)}개여서 첫 파일을 사용합니다: {images[0]}")
+    with Image.open(images[0]) as source:
+        rgb = np.asarray(source.convert("RGB"), dtype=np.float32) / 255.0
+    masks = []
+    for channel_index in range(char_num):
+        channel = np.ascontiguousarray(rgb[:, :, channel_index]).copy()
+        if float(channel.max()) <= 0.0:
+            raise ValueError(f"마스크 채널 {'RGB'[channel_index]}가 비어 있습니다: {images[0]}")
+        masks.append(torch.from_numpy(channel).unsqueeze(0))
+    print(
+        f"[1st sampler] Regional RGB 마스크 로드: file={images[0]}, "
+        f"size={rgb.shape[1]}x{rgb.shape[0]}, channels={char_num}"
+    )
+    return masks
+
+
+def _spectrum_sampler():
+    import nodes as comfy_nodes
+
+    sampler_class = comfy_nodes.NODE_CLASS_MAPPINGS.get("SpectrumSPDKSampler")
+    if sampler_class is None:
+        raise RuntimeError(
+            "SpectrumSPDKSampler를 찾지 못했습니다. comfyui-spectrum-ksampler가 설치·로드되었는지 확인하세요."
+        )
+    return sampler_class()
+
+
+class SoyaFirstSampler_mdsoya:
+    def __init__(self):
+        self._loaded_loras = OrderedDict()
+        self._stable_global_model = None
+        self._stable_global_signature = None
+        self._stable_global_lock = threading.RLock()
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "clip": ("CLIP",),
+                "multi_char": ("STRING", {"default": "", "multiline": True, "forceInput": True}),
+                "seed": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 0xFFFFFFFFFFFFFFFF,
+                        "forceInput": True,
+                    },
+                ),
+                "latent_image": ("LATENT",),
+                "LORA_ACT": ("STRING", {"default": "false", "forceInput": True}),
+                "LORA_DATA": (
+                    "STRING",
+                    {"default": '{"list": []}', "multiline": True, "forceInput": True},
+                ),
+                "mask_location": ("STRING", {"default": "region_mask"}),
+                "steps": ("INT", {"default": 28, "min": 1, "max": 10000}),
+                "cfg": (
+                    "FLOAT",
+                    {"default": 4.0, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01},
+                ),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
+                "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
+                "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "split_mode": (["single"], {"default": "single"}),
+                "spd_scale": (
+                    "FLOAT",
+                    {"default": 0.5, "min": 0.25, "max": 1.0, "step": 0.05, "round": 0.01},
+                ),
+                "spd_sigma": (
+                    "FLOAT",
+                    {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.01, "round": 0.001},
+                ),
+                "adaptive_smc_alpha": (
+                    "FLOAT",
+                    {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.05, "round": 0.001},
+                ),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+            "optional": {
+                "sampler_mode": (
+                    _SAMPLER_MODES,
+                    {
+                        "default": _SAMPLER_MODE_FAST,
+                        "tooltip": (
+                            "KSampler = 원본 ComfyUI KSampler, "
+                            "FAST = Spectrum SPD/SPEED 가속 sampler, "
+                            "SpectrumKSamplerModGuidance = 옵션형 Mod Guidance + "
+                            "Spectrum window/SEA sampler"
+                        ),
+                    },
+                ),
+                "spectrum_options": (
+                    _SPECTRUM_MOD_OPTIONS_TYPE,
+                    {
+                        "tooltip": (
+                            "Spectrum Mod Guidance Options 노드 출력입니다. "
+                            "SpectrumKSamplerModGuidance 모드에서만 사용하며, "
+                            "미연결 시 기존 고정값을 사용합니다."
+                        ),
+                    },
+                ),
+                "vae": ("VAE",),
+                "FACE_ID_DIR": ("STRING", {"default": "", "forceInput": True}),
+                "snapref_enabled": ("BOOLEAN", {"default": False, "tooltip": "캐릭터 대표 이미지를 각 마스크의 참조로 사용합니다."}),
+                "snapref_model": ("STRING", {"default": "snapref_v2a_pre2.safetensors"}),
+                "snapref_mode": (["char", "cs"], {"default": "char", "tooltip": "char: 캐릭터 외형 · cs: 외형과 화풍"}),
+                "snapref_megapixels": ("FLOAT", {"default": 1.0, "min": 0.25, "max": 2.0, "step": 0.25}),
+                "snapref_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "0 = off, 1 = trained strength, 2 = twice the reference attention weight."}),
+                "snapref_fidelity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "SNAPREF": ("STRING", {"default": "", "forceInput": True}),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT", "MODEL", "STRING")
+    RETURN_NAMES = ("output", "model", "face_positions")
+    FUNCTION = "sample"
+    CATEGORY = "sampling"
+    DESCRIPTION = (
+        "ANIMA_MODEL_WO_CHAR와 LORA_DATA를 받아 캐릭터 LoRA를 내부 적용합니다. "
+        "MULTI_CHAR=true이면 공통 모델 계산을 공유하고 각 캐릭터의 LoRA 추가분과 "
+        "프롬프트를 RGB 마스크 영역별로 반영합니다. 배경에는 공통 모델만 사용합니다. sampler_mode에서 원본 "
+        "ComfyUI KSampler, Spectrum SPD/SPEED FAST sampler 또는 옵션형 "
+        "Spectrum Mod Guidance sampler를 선택할 수 있습니다."
+    )
+
+    def _load_lora(self, entry):
+        resolved = _resolve_lora_path(entry["lora_path"])
+        stat = os.stat(resolved)
+        signature = (stat.st_mtime_ns, stat.st_size)
+        cached = self._loaded_loras.get(resolved)
+        if cached is not None and cached[0] == signature:
+            self._loaded_loras.move_to_end(resolved)
+            return cached[1], resolved
+        if cached is not None:
+            print(f"[1st sampler] 변경된 LoRA를 다시 로드합니다: path={resolved}")
+        try:
+            lora = comfy.utils.load_torch_file(resolved, safe_load=True)
+        except Exception as exc:
+            print(f"[1st sampler] LoRA 로드 실패: path={resolved}, error={exc}")
+            traceback.print_exc()
+            raise
+        self._loaded_loras[resolved] = (signature, lora)
+        self._loaded_loras.move_to_end(resolved)
+        while len(self._loaded_loras) > _MAX_LORA_CACHE_ENTRIES:
+            evicted_path, _evicted = self._loaded_loras.popitem(last=False)
+            print(f"[1st sampler] LoRA CPU 캐시 제거: path={evicted_path}")
+        print(f"[1st sampler] LoRA 로드 완료: path={resolved}")
+        return lora, resolved
+
+    @staticmethod
+    def _global_lora_signature(model, entries):
+        lora_signature = []
+        for entry in entries:
+            resolved = _resolve_lora_path(entry["lora_path"])
+            stat = os.stat(resolved)
+            lora_signature.append(
+                (
+                    os.path.normcase(resolved),
+                    int(stat.st_mtime_ns),
+                    int(stat.st_size),
+                    float(entry["strength"]),
+                )
+            )
+        return (
+            id(model),
+            str(getattr(model, "clone_base_uuid", None)),
+            str(getattr(model, "patches_uuid", None)),
+            tuple(lora_signature),
+        )
+
+    def _apply_global_loras(self, model, entries):
+        if not entries:
+            print("[1st sampler] 전역 캐릭터 LoRA 없음: 안정 재사용 생략")
+            return model
+        signature = self._global_lora_signature(model, entries)
+        with self._stable_global_lock:
+            if (
+                self._stable_global_model is not None
+                and self._stable_global_signature == signature
+            ):
+                print(
+                    "[1st sampler] 캐릭터 ModelPatcher 안정 재사용 cache=hit: "
+                    f"loras={len(entries)}, "
+                    f"patches_uuid={getattr(self._stable_global_model, 'patches_uuid', None)}"
+                )
+                return self._stable_global_model
+
+            current_model = model
+            for entry in entries:
+                lora, resolved = self._load_lora(entry)
+                try:
+                    current_model, _ = comfy.sd.load_lora_for_models(
+                        current_model,
+                        None,
+                        lora,
+                        entry["strength"],
+                        0.0,
+                    )
+                except Exception as exc:
+                    print(
+                        f"[1st sampler] 전역 LoRA 적용 실패: path={resolved}, "
+                        f"strength={entry['strength']}, error={exc}"
+                    )
+                    traceback.print_exc()
+                    raise
+                print(
+                    f"[1st sampler] 전역 캐릭터 LoRA 적용: path={resolved}, "
+                    f"strength={entry['strength']}"
+                )
+            cache_state = "miss" if self._stable_global_model is None else "replace"
+            self._stable_global_signature = signature
+            self._stable_global_model = current_model
+            print(
+                f"[1st sampler] 캐릭터 ModelPatcher 안정 재사용 cache={cache_state}: "
+                f"loras={len(entries)}, "
+                f"patches_uuid={getattr(current_model, 'patches_uuid', None)}"
+            )
+            return current_model
+
+    @staticmethod
+    def _sample_stock_padded(
+        model,
+        seed,
+        steps,
+        cfg,
+        sampler_name,
+        scheduler,
+        positive,
+        negative,
+        latent_image,
+        denoise,
+    ):
+        import nodes as comfy_nodes
+
+        if not isinstance(latent_image, dict) or "samples" not in latent_image:
+            raise ValueError("latent_image에 samples tensor가 없습니다")
+        samples = latent_image["samples"]
+        if not torch.is_tensor(samples) or samples.ndim < 4:
+            raise ValueError(
+                f"latent_image.samples 형식이 올바르지 않습니다: {type(samples)!r}, "
+                f"shape={getattr(samples, 'shape', None)}"
+            )
+        original_h, original_w = samples.shape[-2:]
+        pad_h = (-original_h) % 2
+        pad_w = (-original_w) % 2
+        padded_latent = latent_image.copy()
+        if pad_h or pad_w:
+            spatial_pad = (
+                (0, pad_w, 0, pad_h, 0, 0)
+                if samples.ndim == 5
+                else (0, pad_w, 0, pad_h)
+            )
+            padded_latent["samples"] = F.pad(samples, spatial_pad, mode="replicate")
+            noise_mask = padded_latent.get("noise_mask")
+            if noise_mask is not None:
+                if not torch.is_tensor(noise_mask) or noise_mask.ndim < 2:
+                    raise ValueError(
+                        "latent_image.noise_mask 형식이 올바르지 않습니다: "
+                        f"{type(noise_mask)!r}, shape={getattr(noise_mask, 'shape', None)}"
+                    )
+                padded_latent["noise_mask"] = F.pad(
+                    noise_mask,
+                    (0, pad_w, 0, pad_h),
+                    mode="constant",
+                    value=1.0,
+                )
+            print(
+                f"[1st sampler] stock KSampler용 latent padding: "
+                f"{original_w}x{original_h} -> {original_w + pad_w}x{original_h + pad_h}"
+            )
+        result = comfy_nodes.common_ksampler(
+            model,
+            seed,
+            steps,
+            cfg,
+            sampler_name,
+            scheduler,
+            positive,
+            negative,
+            padded_latent,
+            denoise=denoise,
+        )
+        if pad_h or pad_w:
+            output = result[0].copy()
+            output["samples"] = output["samples"][..., :original_h, :original_w]
+            return (output,)
+        return result
+
+    @staticmethod
+    def _sample_spectrum(
+        model,
+        seed,
+        steps,
+        cfg,
+        sampler_name,
+        scheduler,
+        positive,
+        negative,
+        latent_image,
+        denoise,
+        split_mode,
+        spd_scale,
+        spd_sigma,
+        adaptive_smc_alpha,
+    ):
+        return _spectrum_sampler().sample(
+            model=model,
+            seed=seed,
+            steps=steps,
+            cfg=cfg,
+            sampler_name=sampler_name,
+            scheduler=scheduler,
+            positive=positive,
+            negative=negative,
+            latent_image=latent_image,
+            denoise=denoise,
+            split_mode=split_mode,
+            spd_scale=spd_scale,
+            spd_sigma=spd_sigma,
+            adaptive_smc_alpha=adaptive_smc_alpha,
+        )
+
+    @staticmethod
+    def _sample_spectrum_mod_guidance(
+        model,
+        clip,
+        seed,
+        steps,
+        cfg,
+        sampler_name,
+        scheduler,
+        positive,
+        negative,
+        latent_image,
+        denoise,
+        spectrum_options=None,
+    ):
+        return sample_spectrum_mod_guidance(
+            model,
+            clip,
+            seed,
+            steps,
+            cfg,
+            sampler_name,
+            scheduler,
+            positive,
+            negative,
+            latent_image,
+            denoise,
+            spectrum_options,
+            log_prefix="[1st sampler]",
+        )
+
+    def _sample_selected(
+        self,
+        sampler_mode,
+        model,
+        seed,
+        steps,
+        cfg,
+        sampler_name,
+        scheduler,
+        positive,
+        negative,
+        clip,
+        latent_image,
+        denoise,
+        split_mode,
+        spd_scale,
+        spd_sigma,
+        adaptive_smc_alpha,
+        spectrum_options=None,
+    ):
+        if (
+            spectrum_options is not None
+            and sampler_mode != _SAMPLER_MODE_SPECTRUM_MOD_GUIDANCE
+        ):
+            print(
+                "[1st sampler] spectrum_options 입력은 "
+                f"sampler_mode={sampler_mode!r}에서 사용하지 않습니다"
+            )
+        if sampler_mode == _SAMPLER_MODE_KSAMPLER:
+            return self._sample_stock_padded(
+                model,
+                seed,
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                positive,
+                negative,
+                latent_image,
+                denoise,
+            )
+        if sampler_mode == _SAMPLER_MODE_FAST:
+            return self._sample_spectrum(
+                model,
+                seed,
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                positive,
+                negative,
+                latent_image,
+                denoise,
+                split_mode,
+                spd_scale,
+                spd_sigma,
+                adaptive_smc_alpha,
+            )
+        if sampler_mode == _SAMPLER_MODE_SPECTRUM_MOD_GUIDANCE:
+            return self._sample_spectrum_mod_guidance(
+                model,
+                clip,
+                seed,
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                positive,
+                negative,
+                latent_image,
+                denoise,
+                spectrum_options,
+            )
+        raise ValueError(
+            f"지원하지 않는 sampler_mode입니다: {sampler_mode!r} "
+            f"(지원값: {', '.join(_SAMPLER_MODES)})"
+        )
+
+    def sample(
+        self,
+        model,
+        positive,
+        negative,
+        clip,
+        multi_char,
+        seed,
+        latent_image,
+        LORA_ACT,
+        LORA_DATA,
+        mask_location,
+        steps,
+        cfg,
+        sampler_name,
+        scheduler,
+        denoise,
+        split_mode,
+        spd_scale,
+        spd_sigma,
+        adaptive_smc_alpha,
+        sampler_mode=_SAMPLER_MODE_FAST,
+        spectrum_options=None,
+        unique_id=None,
+        vae=None,
+        FACE_ID_DIR="",
+        snapref_enabled=False,
+        snapref_model="snapref_v2a_pre2.safetensors",
+        snapref_mode="char",
+        snapref_megapixels=1.0,
+        snapref_strength=1.0,
+        snapref_fidelity=1.0,
+        SNAPREF="",
+        _embedded_region_masks=None,
+        _embedded_reference_images=None,
+    ):
+        try:
+            if str(SNAPREF or "").strip():
+                reference_settings = json.loads(SNAPREF)
+                snapref_enabled = reference_settings.get("enabled", snapref_enabled)
+                snapref_strength = float(reference_settings.get("strength", 0.0 if reference_settings.get("strength_scale") != "linear" else snapref_strength))
+                if reference_settings.get("strength_scale") != "linear":
+                    snapref_strength = math.exp(snapref_strength)
+                snapref_fidelity = float(reference_settings.get("fidelity", snapref_fidelity))
+                snapref_model = reference_settings.get("model", snapref_model)
+                snapref_mode = reference_settings.get("mode", snapref_mode)
+                snapref_megapixels = float(reference_settings.get("megapixels", snapref_megapixels))
+                FACE_ID_DIR = reference_settings.get("dir", FACE_ID_DIR)
+            payload = _parse_multi_char(multi_char)
+            snapref = None
+            if snapref_enabled and snapref_strength > 0:
+                from .soya_snapref import SnapRef
+                if _embedded_reference_images is not None:
+                    images = _embedded_reference_images
+                else:
+                    raw_refs = str(FACE_ID_DIR or "").strip()
+                    ref_data = json.loads(raw_refs) if raw_refs.startswith("{") else {
+                        "list": [{"CHAR": "", "ipa_path": raw_refs}] if raw_refs else []
+                    }
+                    entries = ref_data.get("list", [])
+                    names = payload["char_name_list"] if payload["enable"] else [str(entry.get("CHAR") or "") for entry in entries]
+                    if not payload["enable"] and len(names) > 1:
+                        raise ValueError("여러 SnapRef 이미지는 캐릭터별 RGB 마스크가 필요합니다")
+                    images = {}
+                    for index, name in enumerate(names):
+                        entry = next((item for item in entries if str(item.get("CHAR") or "") == name), None)
+                        if entry is None or not entry.get("ipa_path"):
+                            print(f"[SnapRef] Reference path missing; retaining region prompt/LoRA: char={name!r}")
+                            continue
+                        raw_path = str(entry["ipa_path"]).replace("\\", "/")
+                        relative_dir = os.path.dirname(raw_path) if os.path.splitext(raw_path)[1] else raw_path
+                        try:
+                            directory = _safe_mask_directory(relative_dir)
+                        except FileNotFoundError as exc:
+                            print(f"[SnapRef] Reference directory missing; retaining region prompt/LoRA: char={name!r}, path={relative_dir!r}, error={exc}")
+                            traceback.print_exc()
+                            continue
+                        files = sorted(
+                            os.path.join(directory, filename) for filename in os.listdir(directory)
+                            if os.path.splitext(filename)[0].casefold() == "representation"
+                            and os.path.splitext(filename)[1].casefold() in _IMAGE_EXTENSIONS
+                        ) if os.path.isdir(directory) else []
+                        if not files:
+                            print(f"[SnapRef] Representative image missing; retaining region prompt/LoRA: char={name!r}, directory={directory!r}")
+                            continue
+                        filename = os.path.relpath(files[0], folder_paths.get_input_directory()).replace("\\", "/")
+                        images[index + 1] = SoyaRefImageLoader_mdsoya().doit(filename, 1024, 1024)[0]
+                        print(f"[SnapRef] Bound char={name!r} to RGB region={index + 1}, image={filename!r}")
+                if images:
+                    if vae is None:
+                        raise ValueError("SnapRef 참조 이미지 인코딩에 VAE 연결이 필요합니다")
+                    snapref = SnapRef(model, clip, vae, images, _resolve_lora_path(snapref_model),
+                                      snapref_mode, snapref_megapixels, snapref_strength, snapref_fidelity)
+                else:
+                    print("[SnapRef] No representative images available; keeping existing sampler behavior")
+            if not payload["enable"]:
+                lora_entries = _parse_lora_entries(LORA_ACT, LORA_DATA)
+                global_model = self._apply_global_loras(model, lora_entries)
+                sampling_model = global_model
+                if snapref is not None:
+                    from .soya_spatial_lora import apply_spatial_loras
+                    size = latent_image["samples"].shape[-2:]
+                    sampling_model = apply_spatial_loras(global_model, [], [torch.ones(1, *size)],
+                                                         [positive], positive, snapref=snapref)
+                print(
+                    "[1st sampler] MULTI_CHAR=false · 캐릭터 LoRA 전역 적용 후 "
+                    f"{sampler_mode} 실행: loras={len(lora_entries)}"
+                )
+                result = self._sample_selected(
+                    sampler_mode,
+                    sampling_model,
+                    seed,
+                    steps,
+                    cfg,
+                    sampler_name,
+                    scheduler,
+                    positive,
+                    negative,
+                    clip,
+                    latent_image,
+                    denoise,
+                    split_mode,
+                    spd_scale,
+                    spd_sigma,
+                    adaptive_smc_alpha,
+                    spectrum_options,
+                )
+                return result[0], global_model, "[]"
+
+            lora_entries = _parse_lora_entries(
+                LORA_ACT,
+                LORA_DATA,
+                payload["char_name_list"],
+            )
+            masks = (_embedded_region_masks if _embedded_region_masks is not None
+                     else _load_channel_masks(mask_location, payload["char_num"]))
+
+            lora_counts = {name: 0 for name in payload["char_name_list"]}
+            region_prompts = []
+            spatial_conditionings = []
+            for index in range(payload["char_num"]):
+                prompt_parts = (
+                    payload["char_trigger_list"][index]
+                    + payload["shared_before"]
+                    + [payload["char_inform"][index]]
+                    + [payload["char_composition_list"][index]]
+                    + payload["shared_after"]
+                )
+                prompt = ", ".join(part for part in prompt_parts if part)
+                tokens = clip.tokenize(prompt)
+                conditioning = clip.encode_from_tokens_scheduled(tokens)
+                spatial_conditionings.append(conditioning)
+                region_prompts.append(prompt)
+
+            background_parts = (
+                payload["background_trigger_list"]
+                + payload["shared_before"]
+                + payload["shared_after"]
+            )
+            if payload["char_num"] > 1 and payload["composition_prompt"] not in background_parts:
+                background_parts.append(payload["composition_prompt"])
+            if (
+                payload["background_prompt"]
+                and payload["background_prompt"] not in background_parts
+            ):
+                background_parts.append(payload["background_prompt"])
+            background_prompt = ", ".join(part for part in background_parts if part)
+            if not background_prompt:
+                raise ValueError(
+                    "MULTI_CHAR.shared_tag에 배경용 공통 프롬프트가 없습니다"
+                )
+            background_conditioning = clip.encode_from_tokens_scheduled(
+                clip.tokenize(background_prompt)
+            )
+            from .soya_spatial_lora import apply_spatial_loras
+
+            loaded = []
+            for entry in lora_entries:
+                lora, resolved = self._load_lora(entry)
+                name = entry["character"]
+                loaded.append((
+                    payload["char_name_list"].index(name), lora, entry["strength"],
+                ))
+                lora_counts[name] += 1
+                print(
+                    f"[1st sampler] 공간 LoRA 준비: char={name!r}, "
+                    f"path={resolved}, strength={entry['strength']}"
+                )
+            for name, count in lora_counts.items():
+                if count == 0:
+                    print(f"[1st sampler] 캐릭터에 적용할 Anima LoRA가 없습니다: char={name!r}; 영역 프롬프트만 적용")
+            # One identity may occur in several cuts; the single-face tracker
+            # must not expand those disjoint masks across panel gutters.
+            face_tracking = payload["mask_render_version"] >= 5 and not payload["panels"]
+            if payload["panels"]:
+                print("[1st sampler] 컷별 인물 마스크 유지 · 얼굴 추적으로 영역 변경 생략")
+            regional_model = apply_spatial_loras(
+                model, loaded, masks, spatial_conditionings, background_conditioning,
+                **({"face_tracking": True} if face_tracking else {}),
+                **({"snapref": snapref} if snapref is not None else {}),
+            )
+            print(
+                "[1st sampler] MULTI_CHAR=true · 공간 LoRA residual + 공유 모델 계산 "
+                f"+ {sampler_mode} 실행: "
+                f"order={payload['char_name_list']}, loras={lora_counts}, "
+                f"prompt_lengths={[len(p) for p in region_prompts]}, "
+                f"background_length={len(background_prompt)}, "
+                f"steps={steps}, denoise={denoise}, "
+                f"mask_fingerprint={payload['mask_fingerprint'][:12]}"
+            )
+            result = self._sample_selected(
+                sampler_mode,
+                regional_model,
+                seed,
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                positive,
+                negative,
+                clip,
+                latent_image,
+                denoise,
+                split_mode,
+                spd_scale,
+                spd_sigma,
+                adaptive_smc_alpha,
+                spectrum_options,
+            )
+            # 후단 HRF/디테일러에는 전역 all-character LoRA 모델이 아니라
+            # 원래 clean model을 넘겨 첫 패스의 영역 분리를 재오염하지 않는다.
+            face_positions = []
+            ui = {}
+            if face_tracking:
+                runtime = regional_model.model_options["transformer_options"]["soya_spatial_lora"]
+                if runtime.tracker is not None:
+                    samples = latent_image["samples"]
+                    size = (samples.shape[-1] * runtime.tracker.scale,
+                            samples.shape[-2] * runtime.tracker.scale)
+                    # Tracking uses the padded first-pass canvas. Crop, rather
+                    # than rescale, before normalizing to the returned image.
+                    for index, box in sorted(runtime.tracker.faces.items()):
+                        bbox = [max(0.0, min(1.0, float(value) / size[axis % 2]))
+                                for axis, value in enumerate(box)]
+                        if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+                            print(f"[FACE_TRACK] Face outside returned canvas: index={index}, box={box}, size={size}")
+                            continue
+                        face_positions.append({"name": payload["char_name_list"][index], "bbox": bbox})
+                    if unique_id is not None:
+                        reference = runtime.tracker.export(size)
+                        if reference is not None:
+                            ui["soya_dynamic_mask"] = [reference]
+                if not face_positions:
+                    print("[FACE_TRACK] No tracked faces available; returning empty face positions")
+                ui["soya_face_positions"] = face_positions
+            output = (result[0], model, json.dumps(face_positions, ensure_ascii=False))
+            return {"ui": ui, "result": output} if ui else output
+        except Exception as exc:
+            print(
+                f"[1st sampler] 샘플링 실패: mask_location={mask_location!r}, "
+                f"sampler_mode={sampler_mode!r}, "
+                f"SNAPREF={SNAPREF!r}, "
+                f"multi_char_len={len(str(multi_char or ''))}, "
+                f"lora_data_len={len(str(LORA_DATA or ''))}, error={exc}"
+            )
+            traceback.print_exc()
+            raise

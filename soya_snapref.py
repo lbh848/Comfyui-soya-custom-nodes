@@ -1,4 +1,4 @@
-"""SnapRef v1a reference encoding for the existing spatial first sampler.
+"""SnapRef reference encoding for the existing spatial first sampler.
 
 Adapted from 0ppxnhximxr/snapref-v1a, revision b06b901f8b8130acb58b2c446b84970267cd0a8c.
 See third_party/SnapRef-LICENSE.md and SnapRef-NOTICE.txt.
@@ -6,10 +6,12 @@ See third_party/SnapRef-LICENSE.md and SnapRef-NOTICE.txt.
 
 import copy
 import json
+import math
 import traceback
 from functools import partial
 
 import torch
+from comfy.ldm.modules.attention import AttentionTensorContainer
 from safetensors import safe_open
 from safetensors.torch import load_file
 
@@ -91,9 +93,11 @@ def _rope(pe, t, h, w):
     return emb.reshape(*emb.shape[:-1], 2, 2).float()
 
 
-def _reference_attention(original, record, index, q, k, v, transformer_options=None):
+def _reference_attention(original, record, index, q, k, v, transformer_options=None, preferred_attention=None):
+    if isinstance(q, AttentionTensorContainer):
+        q, k, v = q.take(), k.take(), v.take()
     record[index] = (k, v)
-    return original(q, k, v, transformer_options=transformer_options or {})
+    return original(q, k, v, transformer_options=transformer_options or {}, preferred_attention=preferred_attention)
 
 
 def _encode_reference(adapter, dit, ref, context, target_hw, mode):
@@ -140,19 +144,23 @@ def _encode_reference(adapter, dit, ref, context, target_hw, mode):
             setattr(owner, name, value)
 
 
-def _masked_reference_attention(original, references, weights, flags, strength, q, k, v, transformer_options=None):
-    """Each positive query reads only its region's reference K/V.
+def _masked_reference_attention(original, references, weights, flags, strength, q, k, v, transformer_options=None, preferred_attention=None, fidelity=1.0):
+    """Each query reads only its region's reference K/V.
 
     Target self-attention stays global. Blend reference deltas with the same
-    overlap budget as character LoRAs; background and negative CFG stay intact.
+    overlap budget as character LoRAs. Fidelity scales negative CFG references;
+    background queries keep their original attention.
     """
+    if isinstance(q, AttentionTensorContainer):
+        q, k, v = q.take(), k.take(), v.take()
     options = transformer_options or {}
-    original_out = original(q, k, v, transformer_options=options)
+    original_out = original(q, k, v, transformer_options=options, preferred_attention=preferred_attention)
     result = original_out.clone()
     batch = q.shape[0] // len(flags)
     for chunk, flag in enumerate(flags):
-        if flag != 0:
+        if flag != 0 and fidelity >= 1.0:
             continue
+        reference_bias = strength + (math.log(max(1.0 - fidelity, 1e-6)) if flag != 0 else 0.0)
         sl = slice(chunk * batch, (chunk + 1) * batch)
         for slot, (ref_k, ref_v) in references.items():
             indices = torch.nonzero(weights[slot] > 0, as_tuple=False).flatten()
@@ -161,11 +169,11 @@ def _masked_reference_attention(original, references, weights, flags, strength, 
             query = q[sl].index_select(1, indices)
             keys = torch.cat((ref_k.expand(batch, -1, -1, -1), k[sl]), dim=1)
             values = torch.cat((ref_v.expand(batch, -1, -1, -1), v[sl]), dim=1)
-            if strength == 0:
-                attended = original(query, keys, values, transformer_options=options)
+            if reference_bias == 0:
+                attended = original(query, keys, values, transformer_options=options, preferred_attention=preferred_attention)
             else:
                 bias = torch.zeros(1, 1, 1, keys.shape[1], device=q.device, dtype=q.dtype)
-                bias[..., :ref_k.shape[1]] = strength
+                bias[..., :ref_k.shape[1]] = reference_bias
                 attended = _masked_attn_op(query, keys, values, options, bias)
             delta = attended - original_out[sl].index_select(1, indices)
             result[sl].index_add_(1, indices, delta * weights[slot, indices].reshape(1, -1, 1))
@@ -175,22 +183,26 @@ def _masked_reference_attention(original, references, weights, flags, strength, 
 class SnapRef:
     """Per-execution state attached to the existing spatial ModelPatcher."""
 
-    def __init__(self, model, clip, vae, images, path, mode="char", megapixels=1.0, strength=0.0):
+    def __init__(self, model, clip, vae, images, path, mode="char", megapixels=1.0, strength=1.0, fidelity=1.0):
         self.adapter = _Adapter(path, model)
         self.mode = mode
-        self.strength = strength
+        self.strength = math.log(strength)
+        self.fidelity = fidelity
         self.refs = {}
-        for slot, image in images.items():
-            pixels = image[:1].movedim(-1, 1)
-            h, w = pixels.shape[-2:]
-            scale = min(1.0, (megapixels * 1024 * 1024 / (w * h)) ** 0.5)
-            width, height = max(16, int(w * scale) // 16 * 16), max(16, int(h * scale) // 16 * 16)
-            pixels = comfy.utils.common_upscale(pixels, width, height, "lanczos", "disabled").movedim(1, -1)
-            latent = vae.encode(pixels[..., :3])
-            if latent.ndim == 4:
-                latent = latent.unsqueeze(2)
-            self.refs[slot] = model.get_model_object("process_latent_in")(latent).cpu()
-            print(f"[SnapRef] Reference region={slot}, size={width}x{height}, mode={mode}")
+        for slot, slot_images in images.items():
+            self.refs[slot] = []
+            for index, image in enumerate(slot_images if isinstance(slot_images, list) else [slot_images]):
+                pixels = image[:1].movedim(-1, 1)
+                h, w = pixels.shape[-2:]
+                scale = min(1.0, (megapixels * 1024 * 1024 / (w * h)) ** 0.5)
+                width, height = max(16, int(w * scale) // 16 * 16), max(16, int(h * scale) // 16 * 16)
+                pixels = comfy.utils.common_upscale(pixels, width, height, "lanczos", "disabled").movedim(1, -1)
+                latent = vae.encode(pixels[..., :3])
+                if latent.ndim == 4:
+                    latent = latent.unsqueeze(2)
+                self.refs[slot].append(model.get_model_object("process_latent_in")(latent).cpu())
+                print(f"[SnapRef] Reference region={slot}, image={index + 1}, size={width}x{height}, mode={mode}")
+        print(f"[SnapRef] Strength={strength}, Fidelity={fidelity}")
         self.cond = clip.encode_from_tokens_scheduled(clip.tokenize(""))[0]
 
     def clear(self):
@@ -206,10 +218,13 @@ class SnapRef:
                 None if ids is None else ids.unsqueeze(0).to(x.device),
                 None if weights is None else weights.unsqueeze(0).unsqueeze(-1).to(x.device, x.dtype))
             try:
-                self.adapter.cache[key] = {
-                    slot: _encode_reference(self.adapter, dit, ref.to(x.device, x.dtype), context, x.shape[-2:], self.mode)
-                    for slot, ref in self.refs.items()
-                }
+                records = {}
+                for slot, refs in self.refs.items():
+                    encoded = [_encode_reference(self.adapter, dit, ref.to(x.device, x.dtype), context, x.shape[-2:], self.mode)
+                               for ref in refs]
+                    records[slot] = [tuple(torch.cat([record[block][kv] for record in encoded], dim=1)
+                                          for kv in (0, 1)) for block in range(len(dit.blocks))]
+                self.adapter.cache[key] = records
             except Exception as exc:
                 self.adapter.clear()
                 print(f"[SnapRef] Reference encoding failed: regions={list(self.refs)}, error={exc}")

@@ -42,9 +42,8 @@ def _layer_roles(dit):
                 roles[getattr(attention, name)] = (
                     "text" if cross and name in ("k_proj", "v_proj") else "image"
                 )
-        for module in block.mlp.modules():
-            if isinstance(module, torch.nn.Linear):
-                roles[module] = "image"
+        roles[block.mlp.layer1] = "image"
+        roles[block.mlp.layer2] = "image"
     return roles
 
 
@@ -219,6 +218,7 @@ def _diffusion_wrapper(executor, *args, **kwargs):
                     _masked_reference_attention, attention.attn_op,
                     {slot: records[index] for slot, records in references.items()},
                     weights, flags, runtime.snapref.strength,
+                    fidelity=runtime.snapref.fidelity,
                 )
         args = list(args)
         if len(args) > 2:

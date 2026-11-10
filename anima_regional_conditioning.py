@@ -6,6 +6,7 @@ from functools import partial
 from typing import Optional
 
 import torch
+from comfy.ldm.modules.attention import AttentionTensorContainer
 import torch.nn.functional as F
 
 import comfy.patcher_extension
@@ -310,6 +311,7 @@ def _masked_attn_op(
     v: torch.Tensor,
     transformer_options: Optional[dict] = None,
     attn_bias: Optional[torch.Tensor] = None,
+    preferred_attention=None,
 ) -> torch.Tensor:
     """
     Drop-in replacement for torch_attention_op that injects a spatial attention
@@ -323,6 +325,8 @@ def _masked_attn_op(
 
     Output: [B, S_q, n_heads * head_dim]
     """
+    if isinstance(q, AttentionTensorContainer):
+        q, k, v = q.take(), k.take(), v.take()
     B, Sq, H, D = q.shape
 
     # [B, S, H, D] → [B, H, S, D] for SDPA

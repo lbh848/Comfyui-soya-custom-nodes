@@ -399,10 +399,11 @@ class SoyaFirstSampler_mdsoya:
                 "vae": ("VAE",),
                 "FACE_ID_DIR": ("STRING", {"default": "", "forceInput": True}),
                 "snapref_enabled": ("BOOLEAN", {"default": False, "tooltip": "캐릭터 대표 이미지를 각 마스크의 참조로 사용합니다."}),
-                "snapref_model": ("STRING", {"default": "snapref_v1b.safetensors"}),
+                "snapref_model": ("STRING", {"default": "snapref_v2a_pre2.safetensors"}),
                 "snapref_mode": (["char", "cs"], {"default": "char", "tooltip": "char: 캐릭터 외형 · cs: 외형과 화풍"}),
                 "snapref_megapixels": ("FLOAT", {"default": 1.0, "min": 0.25, "max": 2.0, "step": 0.25}),
-                "snapref_strength": ("FLOAT", {"default": 0.0, "min": -3.0, "max": 3.0, "step": 0.1, "tooltip": "0은 기본 강도입니다. 값을 높이면 참조를 더 강하게 반영합니다."}),
+                "snapref_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "0 = off, 1 = trained strength, 2 = twice the reference attention weight."}),
+                "snapref_fidelity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "SNAPREF": ("STRING", {"default": "", "forceInput": True}),
             }
         }
@@ -752,23 +753,28 @@ class SoyaFirstSampler_mdsoya:
         vae=None,
         FACE_ID_DIR="",
         snapref_enabled=False,
-        snapref_model="snapref_v1b.safetensors",
+        snapref_model="snapref_v2a_pre2.safetensors",
         snapref_mode="char",
         snapref_megapixels=1.0,
-        snapref_strength=0.0,
+        snapref_strength=1.0,
+        snapref_fidelity=1.0,
         SNAPREF="",
     ):
         try:
             if str(SNAPREF or "").strip():
                 reference_settings = json.loads(SNAPREF)
                 snapref_enabled = reference_settings.get("enabled", snapref_enabled)
-                snapref_strength = float(reference_settings.get("strength", snapref_strength))
+                snapref_strength = float(reference_settings.get("strength", 0.0 if reference_settings.get("strength_scale") != "linear" else snapref_strength))
+                if reference_settings.get("strength_scale") != "linear":
+                    snapref_strength = math.exp(snapref_strength)
+                snapref_fidelity = float(reference_settings.get("fidelity", snapref_fidelity))
+                snapref_model = reference_settings.get("model", snapref_model)
                 snapref_mode = reference_settings.get("mode", snapref_mode)
                 snapref_megapixels = float(reference_settings.get("megapixels", snapref_megapixels))
                 FACE_ID_DIR = reference_settings.get("dir", FACE_ID_DIR)
             payload = _parse_multi_char(multi_char)
             snapref = None
-            if snapref_enabled:
+            if snapref_enabled and snapref_strength > 0:
                 from .soya_snapref import SnapRef
                 raw_refs = str(FACE_ID_DIR or "").strip()
                 ref_data = json.loads(raw_refs) if raw_refs.startswith("{") else {
@@ -807,7 +813,7 @@ class SoyaFirstSampler_mdsoya:
                     if vae is None:
                         raise ValueError("SnapRef 참조 이미지 인코딩에 VAE 연결이 필요합니다")
                     snapref = SnapRef(model, clip, vae, images, _resolve_lora_path(snapref_model),
-                                      snapref_mode, snapref_megapixels, snapref_strength)
+                                      snapref_mode, snapref_megapixels, snapref_strength, snapref_fidelity)
                 else:
                     print("[SnapRef] No representative images available; keeping existing sampler behavior")
             if not payload["enable"]:
