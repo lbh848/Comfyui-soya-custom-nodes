@@ -62,11 +62,7 @@ IDs, picture numbers, LoRA and sampling never enter it.
                   "source": "<sha256>", "kind": "representative"}],
     "char": "Alice", "strength": 1.0,
     "lora": "moss_image_charref_v2.safetensors",
-    "prompt_prefix": "Same character and art style as Picture 1.",
-    "negative": "",
-    "model": "moss_image_sft_int8_convrot.safetensors",
-    "sampling": {"steps": 50, "cfg": 3.0, "sampler_name": "euler",
-                 "scheduler": "sgm_uniform", "denoise": 1.0}
+    "prompt_prefix": "Same character and art style as Picture 1."
   }
 },
 "assets": {"<sha256>": {"encoding": "base64", "data": "..."}}
@@ -79,9 +75,10 @@ three pictures, using `face_only`/`representative` when selected. References sha
 2 = 0.5MP each, 3 = 0.33MP each) so the cached reference K/V stays near the
 single-picture size instead of growing with the roster. Multi-character references
 are experimental; the model card notes that only Picture 1 is consistently stable.
-Reference mode switches the DiT to the existing non-DMD
-`moss_image_sft_int8_convrot.safetensors` and 50-step full-mode sampling, keeps the
-existing style LoRAs, and appends `moss_image_charref_v2.safetensors` as the last LoRA.
+Reference mode only adds the picture conditioning and appends
+`moss_image_charref_v2.safetensors` as the last LoRA. It does not overwrite the
+selected model, sampling values, 4-step LoRA strength, SLG settings, or negative
+prompt; those remain exactly as configured in the preset.
 
 The graph inserts `SoyaMOSSEditModelPatch_mdsoya` after the UNET loader,
 `SoyaMossReferenceImagesV2_mdsoya` decodes the embedded base64 pictures into three IMAGE

@@ -497,7 +497,7 @@ class SoyaMossNegativeEncodeV2_mdsoya:
     CATEGORY = "Soya/Illustration V2"
     FUNCTION = "encode"
     RETURN_TYPES = ("CONDITIONING",)
-    DESCRIPTION = "Encodes the MOSS negative prompt, or the empty CharRef negative."
+    DESCRIPTION = "Encodes the selected MOSS negative prompt for both modes."
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -505,20 +505,20 @@ class SoyaMossNegativeEncodeV2_mdsoya:
 
     def encode(self, clip, prompt_json):
         payload = read_payload(prompt_json)
-        reference = moss_reference(payload)
-        if reference:
+        negative = field_value(payload, "workflow.negative", "STRING")
+        if moss_reference(payload):
             from .soya_moss_edit import encode_moss_edit
-            return (encode_moss_edit(clip, str(reference.get("negative") or ""), None, []),)
-        return (clip.encode_from_tokens_scheduled(clip.tokenize(field_value(payload, "workflow.negative", "STRING"))),)
+            return (encode_moss_edit(clip, negative, None, []),)
+        return (clip.encode_from_tokens_scheduled(clip.tokenize(negative)),)
 
 
 class SoyaMossOptionalLoraV2_mdsoya:
-    """Apply the 4STEP LoRA, or pass through when reference mode is active."""
+    """Apply the 4STEP LoRA with the value selected in the preset."""
 
     CATEGORY = "Soya/Illustration V2"
     FUNCTION = "load"
     RETURN_TYPES = ("MODEL",)
-    DESCRIPTION = "Applies a MOSS LoRA; reference mode disables the 4-step LoRA."
+    DESCRIPTION = "Applies a MOSS LoRA with the configured strength in every mode."
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -534,9 +534,6 @@ class SoyaMossOptionalLoraV2_mdsoya:
         import comfy.sd
         import comfy.utils
         import folder_paths
-        payload = read_payload(prompt_json)
-        if moss_reference(payload):
-            return (model,)
         strength = float(strength)
         if not strength:
             return (model,)
@@ -547,12 +544,12 @@ class SoyaMossOptionalLoraV2_mdsoya:
 
 
 class SoyaMossSkipLayerGuidanceV2_mdsoya:
-    """SLG passthrough; reference mode uses MOSS full mode layer 22 for the whole run."""
+    """Apply Skip Layer Guidance with the values selected in the preset."""
 
     CATEGORY = "Soya/Illustration V2"
     FUNCTION = "patch"
     RETURN_TYPES = ("MODEL",)
-    DESCRIPTION = "Skip Layer Guidance for MOSS; CharRef mode uses layer 22 / 0-1."
+    DESCRIPTION = "Skip Layer Guidance for MOSS using the configured layer and range."
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -567,9 +564,6 @@ class SoyaMossSkipLayerGuidanceV2_mdsoya:
 
     def patch(self, model, double_layers, single_layers, start_percent, end_percent, prompt_json):
         import nodes
-        payload = read_payload(prompt_json)
-        if moss_reference(payload):
-            single_layers, start_percent, end_percent = "22", 0.0, 1.0
         implementation = nodes.NODE_CLASS_MAPPINGS["SkipLayerGuidanceDiTSimple"]()
         return getattr(implementation, implementation.FUNCTION)(
             model=model, double_layers=double_layers, single_layers=single_layers,
