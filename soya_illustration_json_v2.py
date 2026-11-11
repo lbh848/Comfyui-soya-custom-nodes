@@ -622,6 +622,9 @@ def register_illustration_v2(class_mappings, display_mappings):
     from .soya_moss_edit import SoyaMOSSEditModelPatch_mdsoya
     class_mappings["SoyaMOSSEditModelPatch_mdsoya"] = SoyaMOSSEditModelPatch_mdsoya
     display_mappings["SoyaMOSSEditModelPatch_mdsoya"] = "MOSS Edit Model Patch (Soya)"
+    from .soya_moss_dialogue_repair import SoyaMossDialogueRepairV2_mdsoya
+    class_mappings["SoyaMossDialogueRepairV2_mdsoya"] = SoyaMossDialogueRepairV2_mdsoya
+    display_mappings["SoyaMossDialogueRepairV2_mdsoya"] = "MOSS Dialogue Repair V2 (Soya)"
     class_mappings["SoyaMossReferenceImagesV2_mdsoya"] = SoyaMossReferenceImagesV2_mdsoya
     display_mappings["SoyaMossReferenceImagesV2_mdsoya"] = "MOSS Reference Images V2 (Soya JSON)"
     class_mappings["SoyaMossPromptEncodeV2_mdsoya"] = SoyaMossPromptEncodeV2_mdsoya
