@@ -84,10 +84,11 @@ The graph inserts `SoyaMOSSEditModelPatch_mdsoya` after the UNET loader,
 `SoyaMossReferenceImagesV2_mdsoya` decodes the embedded base64 pictures into three IMAGE
 inputs, and `SoyaMossPromptEncodeV2_mdsoya` builds the CharRef edit conditioning from a
 copy of `moss` at execution time (`Same character and art style as Picture N.` markers
-are not stored). `SoyaMossNegativeEncodeV2_mdsoya` encodes the empty reference negative.
-The 4-step workflow's `MOSSLoRA` is replaced by `SoyaMossOptionalLoraV2_mdsoya`, which
-passes the model through unchanged in reference mode; `SkipLayerGuidanceDiTSimple` is
-wrapped by `SoyaMossSkipLayerGuidanceV2_mdsoya`, which pins layer 22 for the whole run.
+are not stored). `SoyaMossNegativeEncodeV2_mdsoya` encodes the preset negative prompt in
+both modes. The 4-step workflow's `MOSSLoRA` is replaced by `SoyaMossOptionalLoraV2_mdsoya`,
+which applies the configured strength in both modes; `SkipLayerGuidanceDiTSimple` is
+wrapped by `SoyaMossSkipLayerGuidanceV2_mdsoya`, which passes the configured layer and
+range through unchanged.
 The vendored edit implementation is `soya_moss_edit.py` (MIT, from
 `ostris/ComfyUI-MOSS-Image-Ostris-Edit`), so no external custom-node pack is required.
 

@@ -513,12 +513,12 @@ class SoyaMossNegativeEncodeV2_mdsoya:
 
 
 class SoyaMossOptionalLoraV2_mdsoya:
-    """Apply the 4STEP LoRA with the value selected in the preset."""
+    """Apply the 4STEP LoRA with the strength configured in the workflow."""
 
     CATEGORY = "Soya/Illustration V2"
     FUNCTION = "load"
     RETURN_TYPES = ("MODEL",)
-    DESCRIPTION = "Applies a MOSS LoRA with the configured strength in every mode."
+    DESCRIPTION = "Applies a MOSS LoRA with the workflow's configured strength in every mode."
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -544,7 +544,7 @@ class SoyaMossOptionalLoraV2_mdsoya:
 
 
 class SoyaMossSkipLayerGuidanceV2_mdsoya:
-    """Apply Skip Layer Guidance with the values selected in the preset."""
+    """Apply Skip Layer Guidance with the values configured in the workflow."""
 
     CATEGORY = "Soya/Illustration V2"
     FUNCTION = "patch"
@@ -570,6 +570,54 @@ class SoyaMossSkipLayerGuidanceV2_mdsoya:
             start_percent=start_percent, end_percent=end_percent)
 
 
+class SoyaMossSwapTextEncodeV2_mdsoya:
+    """Encode a swap_text layout JSON with the Hangul syllable split.
+
+    The MOSS Toolkit's CaptionHelper hard-imports anime-tools, which requires
+    Python 3.13 and torch >= 2.12. swap_text only needs the layout string and
+    the tokenizer split, so this node does that directly with ComfyUI's CLIP.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "clip": ("CLIP",),
+                "prompt_json": ("STRING", {"forceInput": True}),
+            },
+            "optional": {
+                "caption_key": ("STRING", {"default": "workflow.detailer.layout"}),
+            },
+        }
+
+    RETURN_TYPES = ("CONDITIONING",)
+    RETURN_NAMES = ("conditioning",)
+    FUNCTION = "encode"
+    CATEGORY = "Soya/Illustration V2"
+    DESCRIPTION = "MOSS swap_text layout JSON -> CONDITIONING (Hangul syllable split)."
+
+    @staticmethod
+    def _read(payload, key):
+        value = payload
+        for part in str(key).strip().removeprefix("fields.").split("."):
+            if not isinstance(value, dict) or part not in value:
+                raise ValueError(f"JSON prompt is missing {key}")
+            value = value[part]
+        return value
+
+    def encode(self, clip, prompt_json, caption_key="workflow.detailer.layout"):
+        # Imported here so the module also loads as a standalone test fixture.
+        from .soya_moss_token_split import has_hangul, split_clip
+
+        payload = read_payload(prompt_json)
+        text = self._read(payload, caption_key)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"JSON prompt requires a layout string at {caption_key}")
+        text = text.strip()
+        encoder = split_clip(clip) if has_hangul(text) else clip
+        return (encoder.encode_from_tokens_scheduled(encoder.tokenize(text)),)
+
+
 def register_illustration_v2(class_mappings, display_mappings):
     from .soya_moss_edit import SoyaMOSSEditModelPatch_mdsoya
     class_mappings["SoyaMOSSEditModelPatch_mdsoya"] = SoyaMOSSEditModelPatch_mdsoya
@@ -578,6 +626,8 @@ def register_illustration_v2(class_mappings, display_mappings):
     display_mappings["SoyaMossReferenceImagesV2_mdsoya"] = "MOSS Reference Images V2 (Soya JSON)"
     class_mappings["SoyaMossPromptEncodeV2_mdsoya"] = SoyaMossPromptEncodeV2_mdsoya
     display_mappings["SoyaMossPromptEncodeV2_mdsoya"] = "MOSS Prompt Encode V2 (Soya JSON)"
+    class_mappings["SoyaMossSwapTextEncodeV2_mdsoya"] = SoyaMossSwapTextEncodeV2_mdsoya
+    display_mappings["SoyaMossSwapTextEncodeV2_mdsoya"] = "MOSS Swap Text Encode V2 (Soya JSON)"
     class_mappings["SoyaMossNegativeEncodeV2_mdsoya"] = SoyaMossNegativeEncodeV2_mdsoya
     display_mappings["SoyaMossNegativeEncodeV2_mdsoya"] = "MOSS Negative Encode V2 (Soya JSON)"
     class_mappings["SoyaMossOptionalLoraV2_mdsoya"] = SoyaMossOptionalLoraV2_mdsoya
