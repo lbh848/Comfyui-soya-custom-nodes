@@ -16,6 +16,7 @@ import torch.nn.functional as F
 
 import comfy.sd
 import comfy.patcher_extension
+import comfy.model_prefetch
 
 from .soya_character_lora import _merged_path_reason
 from .soya_snapref import _masked_reference_attention
@@ -154,10 +155,11 @@ class _SpatialRuntime:
             adapter = self.adapters.get(key)
             if adapter is None:
                 adapter = copy.copy(source)
-                adapter.weights = tuple(
-                    v.to(device=x.device, dtype=x.dtype) if torch.is_tensor(v) else v
-                    for v in source.weights
-                )
+                with comfy.model_prefetch.pause_malloc_graph():
+                    adapter.weights = tuple(
+                        v.to(device=x.device, dtype=x.dtype) if torch.is_tensor(v) else v
+                        for v in source.weights
+                    )
                 adapter.multiplier = strength
                 self.adapters[key] = adapter
             output = _route_residual(x, output, adapter, role, slot, weights, lengths)

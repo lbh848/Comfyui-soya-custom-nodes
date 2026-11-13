@@ -456,11 +456,17 @@ class SoyaCharLoraEyeDetailer_mdsoya:
                 if lora_entry:
                     resolved = _resolve_lora_path(lora_entry["lora_path"])
                     if resolved:
-                        lora_loaded = comfy.utils.load_torch_file(resolved, safe_load=True)
                         strength = float(lora_entry.get("str", 1.0))
-                        patched_model, _ = comfy.sd.load_lora_for_models(
-                            model, clip, lora_loaded, strength, 0.0
-                        )
+                        if base_model.strip() == "anima":
+                            from .soya_character_lora import load_character_lora_file, load_character_lora_unmerged
+                            patched_model = load_character_lora_unmerged(
+                                model, load_character_lora_file(resolved), strength,
+                            )
+                        else:
+                            lora_loaded = comfy.utils.load_torch_file(resolved, safe_load=True)
+                            patched_model, _ = comfy.sd.load_lora_for_models(
+                                model, clip, lora_loaded, strength, 0.0
+                            )
                         lora_info = f"{os.path.basename(resolved)} @ {strength}"
                     else:
                         lora_info = f"FILE NOT FOUND: {lora_entry['lora_path']}"

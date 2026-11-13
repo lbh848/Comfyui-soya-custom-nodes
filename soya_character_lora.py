@@ -1,27 +1,44 @@
 """Conditioning-scoped LoRA residuals without merged copies of model weights."""
 
 import copy
+import os
 import traceback
-from functools import partial
+from functools import lru_cache, partial
 
 import torch
 
 import comfy.hooks
 import comfy.patcher_extension
+import comfy.sd
+import comfy.utils
 from comfy.weight_adapter.lora import LoRAAdapter
 
 
 _INJECTION_KEY = "soya_character_lora"
 
 
+@lru_cache(maxsize=8)
+def _load_character_lora_file(path, modified_ns, size):
+    # Only CPU tensors live here. Replacing a file invalidates its entry.
+    return comfy.utils.load_torch_file(path, safe_load=True)
+
+
+def load_character_lora_file(path):
+    path = os.path.normcase(os.path.realpath(path))
+    stat = os.stat(path)
+    return _load_character_lora_file(path, stat.st_mtime_ns, stat.st_size)
+
+
 class _CharacterLoRAHook(comfy.hooks.TransformerOptionsHook):
-    def __init__(self, patches=None):
+    def __init__(self, patches=None, always_apply=False):
         super().__init__({}, hook_scope=comfy.hooks.EnumHookScope.HookedOnly)
         self.patches = patches
+        self.always_apply = always_apply
 
     def clone(self):
         cloned = super().clone()
         cloned.patches = self.patches
+        cloned.always_apply = self.always_apply
         return cloned
 
 
@@ -67,14 +84,45 @@ def load_character_lora(model, lora, strength):
     return patched, group
 
 
+def load_character_lora_unmerged(model, lora, strength):
+    """Apply an ordinary global character adapter without replacing base weights.
+
+    Use the installed native loader for key mapping (including Anima remapping).
+    Unsupported weight transformations retain native application for correctness.
+    """
+    if strength == 0:
+        return model
+    mapped, _ = comfy.sd.load_lora_for_models(model, None, lora, strength, 0.0)
+    patches = {
+        key: entries[len(model.patches.get(key, ())):]
+        for key, entries in mapped.patches.items()
+        if len(entries) > len(model.patches.get(key, ()))
+    }
+    if not patches:
+        return model
+    reason = _merged_path_reason(mapped, patches)
+    if reason is not None:
+        print(f"[character LoRA] Native weight path: {reason}, strength={strength}")
+        return mapped
+    patched = model.clone()
+    options = patched.model_options.setdefault("transformer_options", {})
+    options[_INJECTION_KEY] = (*options.get(_INJECTION_KEY, ()),
+                               _CharacterLoRAHook(patches, always_apply=True))
+    patched.remove_wrappers_with_key(comfy.patcher_extension.WrappersMP.OUTER_SAMPLE, _INJECTION_KEY)
+    patched.add_wrapper_with_key(
+        comfy.patcher_extension.WrappersMP.OUTER_SAMPLE, _INJECTION_KEY, _sample_with_character_loras
+    )
+    print(f"[character LoRA] Base weights retained: layers={len(patches)}, strength={strength}")
+    return patched
+
+
 def _add_character_residual(patcher, adapters, module, args, kwargs, output):
     active = patcher.current_hooks
-    if active is not None:
-        for hook, adapter, strength in adapters:
-            if active.contains(hook):
-                adapter.multiplier = strength * hook.strength
-                x = args[0] if args else kwargs["input"]
-                output = output + adapter.h(x, output)
+    for hook, adapter, strength in adapters:
+        if hook.always_apply or (active is not None and active.contains(hook)):
+            adapter.multiplier = strength * hook.strength
+            x = args[0] if args else kwargs["input"]
+            output = output + adapter.h(x, output)
     return output
 
 
@@ -130,7 +178,8 @@ class _CharacterLoRARuntime:
 
 def _sample_with_character_loras(executor, *args, **kwargs):
     guider = executor.class_obj
-    hooks = {}
+    options = guider.model_patcher.model_options.get("transformer_options", {})
+    hooks = {hook.hook_ref: hook for hook in options.get(_INJECTION_KEY, ())}
     for conds in guider.conds.values():
         for cond in conds:
             group = cond.get("hooks")

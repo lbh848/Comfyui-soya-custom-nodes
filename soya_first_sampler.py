@@ -7,7 +7,6 @@ import math
 import os
 import threading
 import traceback
-from collections import OrderedDict
 
 import comfy.samplers
 import comfy.sd
@@ -18,6 +17,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from .soya_ref_image_loader import SoyaRefImageLoader_mdsoya
+from .soya_character_lora import load_character_lora_file, load_character_lora_unmerged
 
 from .soya_spectrum_mod_guidance import (
     _SPECTRUM_MOD_OPTIONS_TYPE,
@@ -26,7 +26,6 @@ from .soya_spectrum_mod_guidance import (
 )
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
-_MAX_LORA_CACHE_ENTRIES = 8
 _SAMPLER_MODE_KSAMPLER = "KSampler"
 _SAMPLER_MODE_FAST = "FAST"
 _SAMPLER_MODE_SPECTRUM_MOD_GUIDANCE = "SpectrumKSamplerModGuidance"
@@ -320,7 +319,6 @@ def _spectrum_sampler():
 
 class SoyaFirstSampler_mdsoya:
     def __init__(self):
-        self._loaded_loras = OrderedDict()
         self._stable_global_model = None
         self._stable_global_signature = None
         self._stable_global_lock = threading.RLock()
@@ -422,26 +420,12 @@ class SoyaFirstSampler_mdsoya:
 
     def _load_lora(self, entry):
         resolved = _resolve_lora_path(entry["lora_path"])
-        stat = os.stat(resolved)
-        signature = (stat.st_mtime_ns, stat.st_size)
-        cached = self._loaded_loras.get(resolved)
-        if cached is not None and cached[0] == signature:
-            self._loaded_loras.move_to_end(resolved)
-            return cached[1], resolved
-        if cached is not None:
-            print(f"[1st sampler] 변경된 LoRA를 다시 로드합니다: path={resolved}")
         try:
-            lora = comfy.utils.load_torch_file(resolved, safe_load=True)
+            lora = load_character_lora_file(resolved)
         except Exception as exc:
             print(f"[1st sampler] LoRA 로드 실패: path={resolved}, error={exc}")
             traceback.print_exc()
             raise
-        self._loaded_loras[resolved] = (signature, lora)
-        self._loaded_loras.move_to_end(resolved)
-        while len(self._loaded_loras) > _MAX_LORA_CACHE_ENTRIES:
-            evicted_path, _evicted = self._loaded_loras.popitem(last=False)
-            print(f"[1st sampler] LoRA CPU 캐시 제거: path={evicted_path}")
-        print(f"[1st sampler] LoRA 로드 완료: path={resolved}")
         return lora, resolved
 
     @staticmethod
@@ -467,6 +451,8 @@ class SoyaFirstSampler_mdsoya:
 
     def _apply_global_loras(self, model, entries):
         if not entries:
+            self._stable_global_model = None
+            self._stable_global_signature = None
             print("[1st sampler] 전역 캐릭터 LoRA 없음: 안정 재사용 생략")
             return model
         signature = self._global_lora_signature(model, entries)
@@ -486,13 +472,7 @@ class SoyaFirstSampler_mdsoya:
             for entry in entries:
                 lora, resolved = self._load_lora(entry)
                 try:
-                    current_model, _ = comfy.sd.load_lora_for_models(
-                        current_model,
-                        None,
-                        lora,
-                        entry["strength"],
-                        0.0,
-                    )
+                    current_model = load_character_lora_unmerged(current_model, lora, entry["strength"])
                 except Exception as exc:
                     print(
                         f"[1st sampler] 전역 LoRA 적용 실패: path={resolved}, "

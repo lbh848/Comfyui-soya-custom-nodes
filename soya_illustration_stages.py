@@ -8,6 +8,7 @@ import comfy.utils
 from .soya_first_sampler_v2_core import _parse_multi_char, _parse_lora_entries, _resolve_lora_path
 from .soya_snapref import SnapRef
 from .soya_spatial_lora import apply_spatial_loras
+from .soya_character_lora import load_character_lora_file
 
 
 def _snapref(model, clip, vae, images, settings):
@@ -40,7 +41,7 @@ def prepare_hires_model(model, clip, vae, positive, image, *, multi, masks,
     names = multi["char_name_list"]
     loaded = []
     for entry in _parse_lora_entries(lora_activate, lora_data, names):
-        lora = comfy.utils.load_torch_file(_resolve_lora_path(entry["lora_path"]), safe_load=True)
+        lora = load_character_lora_file(_resolve_lora_path(entry["lora_path"]))
         loaded.append((names.index(entry["character"]), lora, entry["strength"]))
     conditionings = []
     for index in range(multi["char_num"]):

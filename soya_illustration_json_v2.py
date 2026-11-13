@@ -549,6 +549,7 @@ class SoyaMossOptionalLoraV2_mdsoya:
     def load(self, model, lora_name, strength, prompt_json):
         import folder_paths
         from .soya_batch_lora_loader import SoyaBatchLoraLoader_mdsoya
+        from .soya_moss_spatial_lora import _BASE_KEY, _KEY, attach_spatial_lora
         strength = float(strength)
         if not strength:
             self._lora_loader = None
@@ -556,9 +557,15 @@ class SoyaMossOptionalLoraV2_mdsoya:
         path = folder_paths.get_full_path_or_raise("loras", lora_name)
         if getattr(self, "_lora_loader", None) is None:
             self._lora_loader = SoyaBatchLoraLoader_mdsoya()
+        # The spatial node creates a new wrapper for each character/bbox plan.
+        # Cache the fixed 4STEP weights against its stable global-style base,
+        # then attach this request's regions to the cached weight patcher.
+        base = model.get_attachment(_BASE_KEY)
         patched, _, _ = self._lora_loader.load_batch_lora(
-            model, None, "true", "false",
+            base if base is not None else model, None, "true", "false",
             json.dumps({"list": [{"lora_path": path, "str": strength}]}), "")
+        if base is not None:
+            patched = attach_spatial_lora(patched, model.model_options["transformer_options"][_KEY])
         return (patched,)
 
 
@@ -850,6 +857,13 @@ def register_illustration_v2(class_mappings, display_mappings):
 
             def execute(self, prompt_json, **kwargs):
                 kwargs = self.prepare_inputs(prompt_json, kwargs)
+                if spec["base"] == "SoyaBatchLoraLoader_mdsoya":
+                    # Style/background LoRAs stay merged and cached. Only the
+                    # changing ANIMA character branch uses residual adapters.
+                    kwargs["_character_loras"] = (
+                        spec["json_inputs"]["lora_list"]["key"] == "LORA_DATA"
+                        and kwargs.get("base_filter", "").strip() == "anima"
+                    )
                 # The graph owns the shared source; this node no longer needs it.
                 del prompt_json
                 regions = kwargs.pop("_hires_regions", None)

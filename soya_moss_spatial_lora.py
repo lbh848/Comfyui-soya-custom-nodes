@@ -11,6 +11,7 @@ from functools import partial
 import torch
 import comfy.lora
 import comfy.lora_convert
+import comfy.model_prefetch
 import comfy.ops
 import comfy.patcher_extension
 import comfy.utils
@@ -20,6 +21,19 @@ from comfy.weight_adapter import LoRAAdapter, LoHaAdapter, LoKrAdapter
 from .soya_batch_lora_loader import SoyaBatchLoraLoader_mdsoya
 
 _KEY = "soya_moss_spatial_lora"
+_BASE_KEY = "soya_moss_spatial_base"
+
+
+def attach_spatial_lora(model, runtime):
+    """Attach changing character regions without changing fixed weight patches."""
+    routed = model.clone()
+    routed.set_attachments(_BASE_KEY, model)
+    routed.model_options.setdefault("transformer_options", {})[_KEY] = runtime
+    for kind, wrapper in ((comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, _diffusion_wrapper),
+                          (comfy.patcher_extension.WrappersMP.OUTER_SAMPLE, _sample_wrapper)):
+        routed.remove_wrappers_with_key(kind, _KEY)
+        routed.add_wrapper_with_key(kind, _KEY, wrapper)
+    return routed
 
 
 def character_boxes(layout, workflow):
@@ -74,27 +88,39 @@ class _Runtime:
         self.adapters = {}
         self.active = False
 
-    def layer_hook(self, entries, weights, sequence_length, module, args, kwargs, output):
+    def layer_hook(self, entries, weights, sequence_length, module, args, kwargs, output, *, regions=None):
         if not self.active:
             return output
         if output.ndim != 3 or output.shape[1] != sequence_length:
             raise RuntimeError(f"MOSS BBox LoRA token mismatch: {tuple(output.shape)}, expected {sequence_length}")
         x = args[0] if args else kwargs["input"]
         count = weights.shape[1]
+        if regions is None:
+            regions = [(indices, weight.index_select(0, indices))
+                       for weight in weights for indices in [(weight > 0).nonzero().flatten()]]
         result = output.clone()
         for slot, rows, strength, source in entries:
+            indices, gate = regions[slot]
+            if not indices.numel():
+                continue
             key = (id(source), strength, x.device, x.dtype)
             adapter = self.adapters.get(key)
             if adapter is None:
                 adapter = copy.copy(source)
-                adapter.weights = tuple(v.to(device=x.device, dtype=x.dtype)
-                                        if torch.is_tensor(v) else v for v in source.weights)
+                # These tensors survive the block. Keep them out of Comfy's
+                # temporary-allocation graph so it can reuse its block buffer.
+                with comfy.model_prefetch.pause_malloc_graph():
+                    adapter.weights = tuple(v.to(device=x.device, dtype=x.dtype)
+                                            if torch.is_tensor(v) else v for v in source.weights)
                 adapter.multiplier = strength
                 self.adapters[key] = adapter
             # Never evaluate the adapter on text or reference tokens. Row slices
             # also cover split q/k/v adapters mapped onto a fused projection.
-            delta = adapter.h(x[:, :count], output[:, :count, rows])
-            result[:, :count, rows] += delta * weights[slot][None, :, None]
+            # Linear adapters are token-local: gather only owned tokens rather
+            # than computing full-canvas residuals that the mask discards.
+            delta = adapter.h(x.index_select(1, indices),
+                              output[:, :, rows].index_select(1, indices))
+            result[:, :count, rows].index_add_(1, indices, delta * gate[None, :, None])
         return result
 
 
@@ -111,6 +137,8 @@ def _diffusion_wrapper(executor, *args, **kwargs):
                  if method in ("index", "index_timestep_zero") else 0)
     sequence_length = height * width + context.shape[1] + ref_count
     weights = token_weights(runtime.boxes, height, width, x.device, x.dtype)
+    regions = [(indices, weight.index_select(0, indices))
+               for weight in weights for indices in [(weight > 0).nonzero().flatten()]]
     handles, force_forward = [], []
     previous_preprocess = dit.__dict__.get("preprocess_refs")
     preprocess = dit.preprocess_refs
@@ -133,7 +161,7 @@ def _diffusion_wrapper(executor, *args, **kwargs):
             force_forward.append((module, module.__dict__.get("comfy_force_forward")))
             module.comfy_force_forward = True
             handles.append(module.register_forward_hook(
-                partial(runtime.layer_hook, entries, weights, sequence_length), with_kwargs=True))
+                partial(runtime.layer_hook, entries, weights, sequence_length, regions=regions), with_kwargs=True))
         return executor(*args, **kwargs)
     finally:
         runtime.active = False
@@ -263,11 +291,6 @@ class SoyaMossSpatialLoraV2_mdsoya:
             if skipped:
                 info.append(f"Excluded non-spatial components ({len(skipped)}): {', '.join(skipped)}")
         if patches:
-            model = model.clone()
             runtime = _Runtime([boxes[name] for name in names], patches)
-            model.model_options.setdefault("transformer_options", {})[_KEY] = runtime
-            for kind, wrapper in ((comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, _diffusion_wrapper),
-                                  (comfy.patcher_extension.WrappersMP.OUTER_SAMPLE, _sample_wrapper)):
-                model.remove_wrappers_with_key(kind, _KEY)
-                model.add_wrapper_with_key(kind, _KEY, wrapper)
+            model = attach_spatial_lora(model, runtime)
         return model, clip, "\n".join(info)

@@ -1,5 +1,6 @@
 """CPU contract checks; run with ComfyUI's Python from the ComfyUI directory."""
 import importlib
+import copy
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -24,6 +25,79 @@ def adapter(inputs=2, outputs=2):
 
 
 class SpatialLoraTests(unittest.TestCase):
+    def test_fixed_lora_reuses_weights_across_character_and_bbox_changes(self):
+        import comfy.model_patcher
+        import comfy.supported_models
+        import comfy.utils
+        import folder_paths
+        transport = importlib.import_module("soya_spatial_test.soya_illustration_json_v2")
+        config = comfy.supported_models.MOSSImage(dict(dim=32, ffn_dim=32, num_heads=2,
+                    num_layers=1, text_dim=16, latent_channels=8, fused_qkv=True, dtype=torch.float32))
+        config.custom_operations = comfy.ops.manual_cast
+        base = comfy.model_patcher.ModelPatcher(config.get_model({}, device=torch.device("cpu")),
+                    torch.device("cpu"), torch.device("cpu"))
+        lora = {"diffusion_model.layers.0.proj.q.lora_up.weight": torch.ones(32, 1),
+                "diffusion_model.layers.0.proj.q.lora_down.weight": torch.ones(1, 32)}
+        # Use an existing file for the real file-stat cache key; only its tensor
+        # decoding is mocked. No model files or GPU are needed for this check.
+        path = str(Path(__file__).resolve())
+        payload = {"moss": {"bbox_coord_space": "abs_centralized", "bbox_format": "yxyx",
+                   "items": [{"label": "character", "name": "Alice", "bbox": [-16, -16, 16, 0]}]},
+                   "workflow": {"width": 32, "height": 32, "loras": {"activate": True,
+                   "list": [{"lora_path": path, "str": .4},
+                            {"CHAR": "Alice", "lora_path": path, "str": .5}]}}}
+        regional = spatial.SoyaMossSpatialLoraV2_mdsoya()
+        fixed = transport.SoyaMossOptionalLoraV2_mdsoya()
+        with patch.object(comfy.utils, "load_torch_file", return_value=lora) as read, \
+             patch.object(folder_paths, "get_full_path_or_raise", return_value=path):
+            routed, _, _ = regional.load_loras(base, None, payload)
+            first, = fixed.load(routed, "fixed", 1., "first JSON")
+            first_runtime = first.model_options["transformer_options"][spatial._KEY]
+            fixed_base = first.get_attachment(spatial._BASE_KEY)
+            self.assertEqual(read.call_count, 3)  # style, character, fixed
+            changed = copy.deepcopy(payload)
+            changed["moss"]["items"][0].update(name="Bob", bbox=[-16, 0, 16, 16])
+            changed["workflow"]["loras"]["list"][1].update(CHAR="Bob", str=-.25)
+            routed, _, _ = regional.load_loras(base, None, changed)
+            second, = fixed.load(routed, "fixed", 1., "different JSON")
+            second_runtime = second.model_options["transformer_options"][spatial._KEY]
+            self.assertEqual(read.call_count, 4)  # only the new character
+            self.assertIs(first.model, second.model)
+            self.assertEqual(first.patches_uuid, second.patches_uuid)
+            self.assertIs(second.get_attachment(spatial._BASE_KEY), fixed_base)
+            self.assertIsNot(first_runtime, second_runtime)
+            self.assertEqual(first_runtime.boxes, [[(0., 0., 1., .5)]])
+            self.assertEqual(second_runtime.boxes, [[(0., .5, 1., 1.)]])
+            self.assertEqual(second_runtime.patches["layers.0.proj.qkv"][0][2], -.25)
+            self.assertFalse(base.patches)
+            # Removing all characters must also reuse the same fixed weights.
+            changed["workflow"]["loras"]["list"].pop()
+            routed, _, _ = regional.load_loras(base, None, changed)
+            third, = fixed.load(routed, "fixed", 1., "no character adapters")
+            self.assertIs(third, fixed_base)
+            self.assertEqual(third.patches_uuid, first.patches_uuid)
+            self.assertNotIn(spatial._KEY, third.model_options["transformer_options"])
+            self.assertEqual(read.call_count, 4)
+            # A real fixed-style change must still invalidate weight patches.
+            changed["workflow"]["loras"]["list"][0]["str"] = .8
+            routed, _, _ = regional.load_loras(base, None, changed)
+            fourth, = fixed.load(routed, "fixed", 1., "changed style")
+            self.assertNotEqual(fourth.patches_uuid, third.patches_uuid)
+            self.assertEqual(read.call_count, 6)
+
+    def test_combined_character_adapters_keep_base_and_other_qkv_rows(self):
+        runtime = spatial._Runtime([], {})
+        runtime.active = True
+        x, base = torch.ones(1, 4, 2), torch.full((1, 4, 6), 3.)
+        entries = [(0, slice(0, 2), .5, adapter()), (1, slice(2, 4), -.25, adapter())]
+        output = runtime.layer_hook(entries, torch.tensor([[1., 0.], [0., 1.]]),
+                                    4, None, (x,), {}, base)
+        expected = base.clone()
+        expected[:, 0, :2] += 1.
+        expected[:, 1, 2:4] -= .5
+        torch.testing.assert_close(output, expected)
+        torch.testing.assert_close(base, torch.full_like(base, 3.))
+
     def test_node_with_native_moss_split_qkv_mapping_and_reference_forward(self):
         import comfy.model_patcher
         import comfy.supported_models

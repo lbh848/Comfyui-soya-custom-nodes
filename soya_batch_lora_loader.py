@@ -66,7 +66,7 @@ class SoyaBatchLoraLoader_mdsoya:
             return f"{size / (1024 * 1024):.1f} MB"
         return f"{size / 1024:.1f} KB"
 
-    def load_batch_lora(self, model, clip, enable, apply_clip, lora_list, base_filter):
+    def load_batch_lora(self, model, clip, enable, apply_clip, lora_list, base_filter, _character_loras=False):
         use = enable.strip().lower() == "true"
         patch_clip = apply_clip.strip().lower() == "true"
         info_lines = []
@@ -124,14 +124,14 @@ class SoyaBatchLoraLoader_mdsoya:
                 files.append((os.path.realpath(path), stat.st_mtime_ns, stat.st_size))
         # Captions, seeds, JSON formatting and unrelated workflow fields cannot
         # change weights. File replacements and input patch revisions can.
-        inputs = (model, clip, patch_clip,
+        inputs = (model, clip, patch_clip, _character_loras,
                   [(file, float(entry.get("str", 1.0))) for file, entry in zip(files, filtered)])
         return reuse_resolved_output(
             self, inputs,
-            lambda: self._apply_loras(model, clip, patch_clip, filtered, resolved_paths, info_lines),
+            lambda: self._apply_loras(model, clip, patch_clip, filtered, resolved_paths, info_lines, _character_loras),
             self.__class__.__name__)
 
-    def _apply_loras(self, model, clip, patch_clip, filtered, resolved_paths, info_lines):
+    def _apply_loras(self, model, clip, patch_clip, filtered, resolved_paths, info_lines, character_loras):
         # 순차 적용
         current_model = model
         current_clip = clip
@@ -158,11 +158,17 @@ class SoyaBatchLoraLoader_mdsoya:
                 info_lines.append(f"     File: {filename} ({file_size})")
                 continue
 
-            lora_data = comfy.utils.load_torch_file(resolved, safe_load=True)
-            clip_strength = strength if patch_clip else 0.0
-            current_model, current_clip = comfy.sd.load_lora_for_models(
-                current_model, current_clip, lora_data, strength, clip_strength
-            )
+            if character_loras and not patch_clip:
+                from .soya_character_lora import load_character_lora_file, load_character_lora_unmerged
+                current_model = load_character_lora_unmerged(
+                    current_model, load_character_lora_file(resolved), strength,
+                )
+            else:
+                lora_data = comfy.utils.load_torch_file(resolved, safe_load=True)
+                clip_strength = strength if patch_clip else 0.0
+                current_model, current_clip = comfy.sd.load_lora_for_models(
+                    current_model, current_clip, lora_data, strength, clip_strength
+                )
             applied_count += 1
             info_lines.append(f"  {i+1}. [APPLIED] {filename}")
             if patch_clip:
