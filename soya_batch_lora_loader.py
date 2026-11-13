@@ -74,6 +74,7 @@ class SoyaBatchLoraLoader_mdsoya:
         info_lines.append(f"Apply Clip: {apply_clip.strip()} → {'ON' if patch_clip else 'OFF'}")
 
         if not use:
+            self._resolved_cache = None
             info_lines.append("Result: Passing through (disabled)")
             return (model, clip, "\n".join(info_lines))
 
@@ -81,6 +82,7 @@ class SoyaBatchLoraLoader_mdsoya:
         try:
             data = json.loads(lora_list)
         except json.JSONDecodeError as e:
+            self._resolved_cache = None
             info_lines.append(f"[ERROR] JSON parse failed: {e}")
             return (model, clip, "\n".join(info_lines))
 
@@ -88,6 +90,7 @@ class SoyaBatchLoraLoader_mdsoya:
         info_lines.append(f"Total LoRAs in list: {len(loras)}")
 
         if not loras:
+            self._resolved_cache = None
             info_lines.append("Result: Passing through (empty list)")
             return (model, clip, "\n".join(info_lines))
 
@@ -106,21 +109,40 @@ class SoyaBatchLoraLoader_mdsoya:
         info_lines.append("─" * 50)
 
         if not filtered:
+            self._resolved_cache = None
             info_lines.append("Result: Passing through (no matching LoRAs)")
             return (model, clip, "\n".join(info_lines))
 
+        from .soya_illustration_json_v2 import reuse_resolved_output
+        resolved_paths = [self._resolve_lora_path(entry.get("lora_path", "")) for entry in filtered]
+        files = []
+        for path in resolved_paths:
+            if path is None:
+                files.append(None)
+            else:
+                stat = os.stat(path)
+                files.append((os.path.realpath(path), stat.st_mtime_ns, stat.st_size))
+        # Captions, seeds, JSON formatting and unrelated workflow fields cannot
+        # change weights. File replacements and input patch revisions can.
+        inputs = (model, clip, patch_clip,
+                  [(file, float(entry.get("str", 1.0))) for file, entry in zip(files, filtered)])
+        return reuse_resolved_output(
+            self, inputs,
+            lambda: self._apply_loras(model, clip, patch_clip, filtered, resolved_paths, info_lines),
+            self.__class__.__name__)
+
+    def _apply_loras(self, model, clip, patch_clip, filtered, resolved_paths, info_lines):
         # 순차 적용
         current_model = model
         current_clip = clip
         applied_count = 0
         skipped_count = 0
 
-        for i, lora_entry in enumerate(filtered):
+        for i, (lora_entry, resolved) in enumerate(zip(filtered, resolved_paths)):
             lora_path = lora_entry.get("lora_path", "")
             strength = float(lora_entry.get("str", 1.0))
             base = lora_entry.get("BASE", "")
 
-            resolved = self._resolve_lora_path(lora_path)
             if resolved is None:
                 skipped_count += 1
                 info_lines.append(f"  {i+1}. [SKIP] File not found")

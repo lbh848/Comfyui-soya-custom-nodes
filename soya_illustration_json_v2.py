@@ -45,6 +45,22 @@ def resolved_input_signature(value):
             value._version if isinstance(value, torch.Tensor) and not value.is_inference() else None)
 
 
+def reuse_resolved_output(node, inputs, execute, label):
+    """Keep one resolved result, independent of transport JSON invalidation."""
+    signature = resolved_input_signature(inputs)
+    cached = getattr(node, "_resolved_cache", None)
+    if cached is not None and cached[0] == signature:
+        logging.info("[Soya:JSONReuse] %s: reuse", label)
+        return cached[2]
+    # Drop the old LoRA/model references before preparing the replacement.
+    node._resolved_cache = None
+    del cached
+    result = execute()
+    node._resolved_cache = (signature, inputs, result)
+    logging.info("[Soya:JSONReuse] %s: updated", label)
+    return result
+
+
 def read_payload(prompt_json):
     payload = json.loads(prompt_json)
     if not isinstance(payload, dict):
@@ -531,15 +547,18 @@ class SoyaMossOptionalLoraV2_mdsoya:
         }}
 
     def load(self, model, lora_name, strength, prompt_json):
-        import comfy.sd
-        import comfy.utils
         import folder_paths
+        from .soya_batch_lora_loader import SoyaBatchLoraLoader_mdsoya
         strength = float(strength)
         if not strength:
+            self._lora_loader = None
             return (model,)
         path = folder_paths.get_full_path_or_raise("loras", lora_name)
-        lora = comfy.utils.load_torch_file(path, safe_load=True)
-        patched, _ = comfy.sd.load_lora_for_models(model, None, lora, strength, 0.0)
+        if getattr(self, "_lora_loader", None) is None:
+            self._lora_loader = SoyaBatchLoraLoader_mdsoya()
+        patched, _, _ = self._lora_loader.load_batch_lora(
+            model, None, "true", "false",
+            json.dumps({"list": [{"lora_path": path, "str": strength}]}), "")
         return (patched,)
 
 
@@ -847,23 +866,12 @@ def register_illustration_v2(class_mappings, display_mappings):
                     kwargs["_reference_model"] = partial(prepare_hand_model, clip=kwargs["clip"], **hand)
                 if not hasattr(self, "_implementation"):
                     self._implementation = base_class()()
-                signature = resolved_input_signature(kwargs) if reuse_outputs else None
                 if reuse_outputs:
-                    cached = getattr(self, "_resolved_cache", None)
-                    if cached is not None and cached[0] == signature:
-                        logging.info("[Soya:JSONReuse] %s: reuse", spec["name"])
-                        return cached[2]
-                    # One entry per node instance. Release the previous inputs
-                    # and result before loading a different model/configuration.
-                    self._resolved_cache = None
-                    del cached
-                result = getattr(self._implementation, self._implementation.FUNCTION)(**kwargs)
-                if reuse_outputs:
-                    # Retain only this entry's resolved arguments/model refs,
-                    # never prompt_json or the parsed Base64 asset document.
-                    self._resolved_cache = (signature, kwargs, result)
-                    logging.info("[Soya:JSONReuse] %s: updated", spec["name"])
-                return result
+                    return reuse_resolved_output(
+                        self, kwargs,
+                        lambda: getattr(self._implementation, self._implementation.FUNCTION)(**kwargs),
+                        spec["name"])
+                return getattr(self._implementation, self._implementation.FUNCTION)(**kwargs)
 
         if spec["base"] == "SoyaFirstSampler_mdsoya":
             # Queueing the same fixed seed explicitly requests another sample.

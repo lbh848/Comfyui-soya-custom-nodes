@@ -218,6 +218,7 @@ class SoyaMossSpatialLoraV2_mdsoya:
         workflow, layout = payload["workflow"], payload["moss"]
         config = workflow.get("loras") or {}
         if not config.get("activate", False):
+            self._global_lora_loader = None
             return model, clip, "MOSS BBox LoRA: disabled"
         if not isinstance(model.get_model_object("diffusion_model"), MOSSImage):
             raise ValueError("MOSS BBox LoRA requires ComfyUI's MOSSImage model")
@@ -243,7 +244,9 @@ class SoyaMossSpatialLoraV2_mdsoya:
             if name not in names:
                 names.append(name)
             regional.append((names.index(name), entry, strength))
-        loader = SoyaBatchLoraLoader_mdsoya()
+        if getattr(self, "_global_lora_loader", None) is None:
+            self._global_lora_loader = SoyaBatchLoraLoader_mdsoya()
+        loader = self._global_lora_loader
         model, clip, global_info = loader.load_batch_lora(
             model, clip, "true", "false", json.dumps({"list": global_loras}), "")
         info.append(global_info)

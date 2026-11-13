@@ -473,6 +473,12 @@ class SoyaMOSSEditModelPatch_mdsoya:
     )
 
     def patch(self, model, kv_cache=True):
+        from .soya_illustration_json_v2 import reuse_resolved_output
+        return reuse_resolved_output(
+            self, (model, kv_cache), lambda: self._patch(model, kv_cache),
+            "SoyaMOSSEditModelPatch_mdsoya")
+
+    def _patch(self, model, kv_cache):
         cleared = _clear_ref_caches()
         if cleared:
             logging.info(
