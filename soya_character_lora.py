@@ -1,6 +1,7 @@
 """Conditioning-scoped LoRA residuals without merged copies of model weights."""
 
 import copy
+import math
 import os
 import traceback
 from functools import lru_cache, partial
@@ -11,6 +12,7 @@ import comfy.hooks
 import comfy.patcher_extension
 import comfy.sd
 import comfy.utils
+from comfy.weight_adapter.bypass import get_module_type_info
 from comfy.weight_adapter.lora import LoRAAdapter
 
 
@@ -45,17 +47,29 @@ class _CharacterLoRAHook(comfy.hooks.TransformerOptionsHook):
 def _merged_path_reason(model, patches):
     for key, entries in patches.items():
         if not key.endswith(".weight"):
-            return f"{key}: residual path requires a linear weight"
+            return f"{key}: residual path requires a linear or convolution weight"
         module = model.get_model_object(key[:-7])
-        if not isinstance(module, torch.nn.Linear):
+        is_conv = isinstance(module, torch.nn.Conv2d)
+        if not isinstance(module, torch.nn.Linear) and not is_conv:
             return f"{key}: {type(module).__name__} uses the native weight adapter"
+        if is_conv and (module.groups != 1 or module.padding_mode != "zeros"):
+            return f"{key}: grouped/nonzero-padding convolution needs native application"
         for strength, adapter, model_strength, offset, function in entries:
             if not isinstance(adapter, LoRAAdapter):
                 return f"{key}: {type(adapter).__name__} uses the native weight adapter"
             up, down, alpha, mid, dora, reshape = adapter.weights
             if mid is not None or dora is not None or reshape is not None:
                 return f"{key}: mid/DoRA/reshape needs the native weight adapter"
-            if up.ndim != 2 or down.ndim != 2:
+            if is_conv:
+                # Ordinary SDXL LoRA: spatial down projection, then 1x1 up.
+                # Flattened kernels are also accepted by Comfy's adapter.h().
+                rank = down.shape[0]
+                down_shape = (rank, module.in_channels, *module.kernel_size)
+                up_shape = (module.out_channels, rank, 1, 1)
+                flat_down_shape = (rank, module.in_channels * math.prod(module.kernel_size))
+                if tuple(down.shape) not in (down_shape, flat_down_shape) or tuple(up.shape) not in (up_shape, up_shape[:2]):
+                    return f"{key}: nonstandard convolution LoRA needs native application"
+            elif up.ndim != 2 or down.ndim != 2:
                 return f"{key}: non-matrix LoRA needs the native weight adapter"
             if model_strength != 1.0 or offset is not None or function is not None:
                 return f"{key}: transformed weight patch needs native application"
@@ -63,7 +77,7 @@ def _merged_path_reason(model, patches):
 
 
 def load_character_lora(model, lora, strength):
-    """Keep native key mapping and use residuals for ordinary linear LoRAs."""
+    """Keep native key mapping and use residuals for ordinary LoRAs."""
     patched, _, group = comfy.hooks.load_hook_lora_for_models(model, None, lora, strength, 0.0)
     weight_hook = group.hooks[0]
     patches = patched.hook_patches[weight_hook.hook_ref]
@@ -142,9 +156,15 @@ class _CharacterLoRARuntime:
             for hook in self.hooks:
                 for key, patches in hook.patches.items():
                     module = patcher.get_model_object(key[:-7])
+                    module_info = get_module_type_info(module)
                     adapters = state["layers"].setdefault(module, [])
                     for strength, source, _, _, _ in patches:
                         adapter = copy.copy(source)
+                        for name in ("is_conv", "conv_dim", "kernel_size", "in_channels", "out_channels"):
+                            setattr(adapter, name, module_info[name])
+                        adapter.kw_dict = {
+                            name: module_info[name] for name in ("stride", "padding", "dilation", "groups")
+                        } if module_info["is_conv"] else {}
                         adapter.weights = tuple(
                             value.to(device=patcher.load_device, dtype=dtype)
                             if torch.is_tensor(value) else value
