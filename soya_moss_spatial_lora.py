@@ -11,6 +11,7 @@ from functools import partial
 import torch
 import comfy.lora
 import comfy.lora_convert
+import comfy.ops
 import comfy.patcher_extension
 import comfy.utils
 from comfy.ldm.moss_image.model import MOSSImage
@@ -186,8 +187,11 @@ def _spatial_patches(model, lora, slot, strength):
         if isinstance(adapter, LoRAAdapter) and adapter.weights[5] is not None:
             raise ValueError(f"MOSS BBox LoRA cannot reshape a base weight: {path}")
         module = model.get_model_object(target[:-7])
-        if not isinstance(module, torch.nn.Linear):
-            raise ValueError(f"MOSS BBox LoRA requires linear projections: {path}")
+        # Comfy's INT8 Linear inherits nn.Module + MixedPrecisionOp rather
+        # than nn.Linear. It exposes the same feature dimensions and hooks.
+        if not (isinstance(module, (torch.nn.Linear, comfy.ops.MixedPrecisionOp))
+                and hasattr(module, "in_features") and hasattr(module, "out_features")):
+            raise ValueError(f"MOSS BBox LoRA requires linear projections: {path} ({type(module).__qualname__})")
         patches.setdefault(path, []).append((slot, rows, strength, adapter))
     if not patches:
         raise ValueError("MOSS BBox LoRA: no supported image transformer projections in adapter")

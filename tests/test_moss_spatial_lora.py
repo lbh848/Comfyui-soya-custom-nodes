@@ -31,9 +31,18 @@ class SpatialLoraTests(unittest.TestCase):
                     num_layers=1, text_dim=16, latent_channels=8, fused_qkv=True, dtype=torch.float32))
         config.custom_operations = comfy.ops.manual_cast
         model = config.get_model({}, device=torch.device("cpu"))
+        # INT8 ComfyUI Linear inherits nn.Module + MixedPrecisionOp, not
+        # nn.Linear. Exercise that actual class rather than a mock subclass.
+        original = model.diffusion_model.layers[0].proj["o"]
+        quant_linear = comfy.ops.mixed_precision_ops(compute_dtype=torch.float32).Linear(32, 32, bias=False)
+        quant_linear.load_state_dict(original.state_dict())
+        model.diffusion_model.layers[0].proj["o"] = quant_linear
+        self.assertNotIsInstance(quant_linear, torch.nn.Linear)
         patcher = comfy.model_patcher.ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
         lora = {"diffusion_model.layers.0.proj.q.lora_up.weight": torch.ones(32, 1),
-                "diffusion_model.layers.0.proj.q.lora_down.weight": torch.ones(1, 32)}
+                "diffusion_model.layers.0.proj.q.lora_down.weight": torch.ones(1, 32),
+                "diffusion_model.layers.0.proj.o.lora_up.weight": torch.ones(32, 1),
+                "diffusion_model.layers.0.proj.o.lora_down.weight": torch.ones(1, 32)}
         payload = {"moss": {"bbox_coord_space": "abs_centralized", "bbox_format": "yxyx",
                    "items": [{"label": "character", "name": "Alice", "bbox": [-16, -16, 16, 0]}]},
                    "workflow": {"width": 32, "height": 32,
@@ -44,6 +53,7 @@ class SpatialLoraTests(unittest.TestCase):
         self.assertIn("BBox: Alice", info)
         self.assertFalse(patcher.patches)
         runtime = routed.model_options["transformer_options"][spatial._KEY]
+        self.assertIn("layers.0.proj.o", runtime.patches)
         entry = runtime.patches["layers.0.proj.qkv"][0]
         self.assertEqual((entry[1].start, entry[1].stop), (0, 32))
         # A tiny native MOSS forward catches actual positional wrapper arguments
