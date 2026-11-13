@@ -303,3 +303,7 @@ register_illustration_v2(NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS)
 from .soya_gemma4_vision import register_gemma4_vision
 register_gemma4_vision(NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS)
 # END SOYA GEMMA VISION
+
+from .soya_moss_spatial_lora import SoyaMossSpatialLoraV2_mdsoya
+NODE_CLASS_MAPPINGS["SoyaMossSpatialLoraV2_mdsoya"] = SoyaMossSpatialLoraV2_mdsoya
+NODE_DISPLAY_NAME_MAPPINGS["SoyaMossSpatialLoraV2_mdsoya"] = "MOSS BBox LoRA (Soya)"
