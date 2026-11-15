@@ -174,6 +174,12 @@ def regional_masks(payload):
     return masks
 
 
+def reference_stage_delivery(settings, stage):
+    key = "detailer_reference" if stage in {"face", "eye"} else "primary_reference"
+    mode = settings.get(key) or settings.get("secondary_reference", "none")
+    return ("face_only" if stage in {"face", "eye"} else "none") if mode == "stage" else mode
+
+
 def stage_reference_assets(payload, stage):
     """Select reference asset IDs for both execution and flow previews."""
     settings = payload["fields"].get("SNAPREF", {})
@@ -193,11 +199,9 @@ def stage_reference_assets(payload, stage):
             if item.get("face_asset"):
                 faces.append(item["face_asset"])
             (faces if is_face else general).append(item["asset"])
-        mode = settings.get("secondary_reference", "none")
+        mode = reference_stage_delivery(settings, stage)
         if mode == "face_only":
             keys = faces[:1] if faces else general[:1]
-        elif mode == "stage":
-            keys = faces[:1] if stage in {"face", "eye"} and faces else general[:1]
         elif mode == "face":
             keys = general[:1] + faces[:1]
         elif mode == "representative":
