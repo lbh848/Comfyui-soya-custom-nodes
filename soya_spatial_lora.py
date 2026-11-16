@@ -6,7 +6,6 @@ Keep global self attention for composition. Only direct adapter injection is
 spatially restricted; this does not promise zero downstream identity leakage.
 """
 
-import copy
 import math
 import traceback
 from functools import partial
@@ -16,10 +15,10 @@ import torch.nn.functional as F
 
 import comfy.sd
 import comfy.patcher_extension
-import comfy.model_prefetch
+import comfy.model_management
 
 from .soya_character_lora import _merged_path_reason
-from .soya_snapref import _masked_reference_attention
+from .soya_snapref import _adapter_memory, _device_adapter, _masked_reference_attention
 from .anima_regional_conditioning import (
     AnimaConditioningRegionChain,
     AnimaRegionalConditioningPatch,
@@ -151,19 +150,30 @@ class _SpatialRuntime:
     def layer_hook(self, entries, weights, lengths, module, args, kwargs, output):
         x = args[0] if args else kwargs["input"]
         for slot, role, strength, source in entries:
-            key = (id(source), strength, x.device, x.dtype)
-            adapter = self.adapters.get(key)
-            if adapter is None:
-                adapter = copy.copy(source)
-                with comfy.model_prefetch.pause_malloc_graph():
-                    adapter.weights = tuple(
-                        v.to(device=x.device, dtype=x.dtype) if torch.is_tensor(v) else v
-                        for v in source.weights
-                    )
-                adapter.multiplier = strength
-                self.adapters[key] = adapter
+            adapter = _device_adapter(source, strength, x.device, x.dtype, self.adapters)
             output = _route_residual(x, output, adapter, role, slot, weights, lengths)
         return output
+
+
+def _prepare_sampling_wrapper(executor, model, noise_shape, conds, model_options=None, **kwargs):
+    runtime = model_options["transformer_options"][_KEY]
+    if runtime.snapref is not None:
+        dit = model.get_model_object("diffusion_model")
+        dtype = model.model.get_dtype_inference()
+        target_entries = [(strength, source) for entries in runtime.patches.values()
+                          for _slot, _role, strength, source in entries]
+        ref_entries = [(scale, source) for entries in runtime.snapref.adapter.patches["ref"].values()
+                       for scale, source, *_ in entries]
+        memory = runtime.snapref.memory_required(dit, dtype) + _adapter_memory(target_entries + ref_entries, dtype)
+        devices = dict.fromkeys(patcher.load_device for patcher in [model] + model.get_additional_models_with_key("multigpu"))
+        for device in devices:
+            if not comfy.model_management.is_device_cpu(device):
+                comfy.model_management.free_memory(memory + comfy.model_management.minimum_inference_memory(), device)
+            runtime.snapref.allocate(dit, device, dtype)
+            for strength, source in target_entries:
+                _device_adapter(source, strength, device, dtype, runtime.adapters)
+            print(f"[SnapRef] Allocated reference K/V and adapters before model loading: {memory / (1024 ** 2):.1f} MiB on {device}")
+    return executor(model, noise_shape, conds, model_options=model_options, **kwargs)
 
 
 def _unified_context(context, contexts, flags):
@@ -325,6 +335,7 @@ def apply_spatial_loras(model, loras, masks, conditionings, background, *, face_
         patched = model.clone()
         patched.model_options.setdefault("transformer_options", {})[_KEY] = runtime
         for kind, wrapper in (
+            (comfy.patcher_extension.WrappersMP.PREPARE_SAMPLING, _prepare_sampling_wrapper),
             (comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, _diffusion_wrapper),
             (comfy.patcher_extension.WrappersMP.OUTER_SAMPLE, _sample_wrapper),
         ):

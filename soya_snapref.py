@@ -17,7 +17,27 @@ from safetensors.torch import load_file
 
 import comfy.sd
 import comfy.utils
+import comfy.model_management
+import comfy.model_prefetch
 from .anima_regional_conditioning import _masked_attn_op
+
+
+def _adapter_memory(entries, dtype):
+    sources = {(id(source), scale): source for scale, source in entries}
+    return sum(value.numel() * comfy.model_management.dtype_size(dtype)
+               for source in sources.values() for value in source.weights if torch.is_tensor(value))
+
+
+def _device_adapter(source, scale, device, dtype, cache):
+    key = (id(source), scale, device, dtype)
+    if key not in cache:
+        adapter = copy.copy(source)
+        with comfy.model_prefetch.pause_malloc_graph():
+            adapter.weights = tuple(value.to(device=device, dtype=dtype) if torch.is_tensor(value) else value
+                                    for value in source.weights)
+        adapter.multiplier = scale
+        cache[key] = adapter
+    return cache[key]
 
 
 class _Adapter:
@@ -70,13 +90,8 @@ class _Adapter:
     def hook(self, entries, module, args, output):
         x = args[0]
         for scale, source, _model_scale, _offset, _function in entries:
-            key = (id(source), x.device, x.dtype)
-            if key not in self.device_adapters:
-                adapter = copy.copy(source)
-                adapter.weights = tuple(v.to(device=x.device, dtype=x.dtype) if torch.is_tensor(v) else v for v in source.weights)
-                adapter.multiplier = scale
-                self.device_adapters[key] = adapter
-            output = output + self.device_adapters[key].h(x, output)
+            adapter = _device_adapter(source, scale, x.device, x.dtype, self.device_adapters)
+            output = output + adapter.h(x, output)
         return output
 
 
@@ -96,13 +111,13 @@ def _rope(pe, t, h, w):
 def _reference_attention(original, record, index, q, k, v, transformer_options=None, preferred_attention=None):
     if isinstance(q, AttentionTensorContainer):
         q, k, v = q.take(), k.take(), v.take()
-    record[index] = (k, v)
+    record[index][0].copy_(k)
+    record[index][1].copy_(v)
     return original(q, k, v, transformer_options=transformer_options or {}, preferred_attention=preferred_attention)
 
 
-def _encode_reference(adapter, dit, ref, context, target_hw, mode):
+def _encode_reference(adapter, dit, ref, context, target_hw, mode, record):
     handles, attention_ops = [], []
-    record = [None] * len(dit.blocks)
     # Mod Guidance belongs to the target CFG batch. Reference encoding uses
     # its own sigma-zero/mode embedding and must not inherit target deltas.
     guidance_state = [(owner, name, getattr(owner, name))
@@ -134,7 +149,6 @@ def _encode_reference(adapter, dit, ref, context, target_hw, mode):
         for block in dit.blocks:
             x = block(x, t_emb, context, rope_emb_L_1_1_D=rope.unsqueeze(1).unsqueeze(0),
                       adaln_lora_B_T_3D=adaln, extra_per_block_pos_emb=None, transformer_options={})
-        return record
     finally:
         for handle in handles:
             handle.remove()
@@ -189,6 +203,7 @@ class SnapRef:
         self.strength = math.log(strength)
         self.fidelity = fidelity
         self.refs = {}
+        self.buffers = {}
         for slot, slot_images in images.items():
             self.refs[slot] = []
             for index, image in enumerate(slot_images if isinstance(slot_images, list) else [slot_images]):
@@ -207,6 +222,30 @@ class SnapRef:
 
     def clear(self):
         self.adapter.clear()
+        self.buffers.clear()
+
+    def token_counts(self, dit):
+        return {slot: [math.ceil(ref.shape[2] / dit.patch_temporal)
+                       * math.ceil(ref.shape[3] / dit.patch_spatial)
+                       * math.ceil(ref.shape[4] / dit.patch_spatial) for ref in refs]
+                for slot, refs in self.refs.items()}
+
+    def memory_required(self, dit, dtype):
+        tokens = sum(sum(counts) for counts in self.token_counts(dit).values())
+        return tokens * dit.model_channels * 2 * len(dit.blocks) * comfy.model_management.dtype_size(dtype)
+
+    def allocate(self, dit, device, dtype):
+        # Allocate persistent K/V before loading the diffusion model, so both
+        # static and dynamic VRAM loaders see its actual resident footprint.
+        self.buffers[device, dtype] = {
+            slot: [tuple(torch.empty((1, sum(counts), dit.num_heads, dit.model_channels // dit.num_heads),
+                                     device=device, dtype=dtype) for _ in range(2))
+                   for _ in dit.blocks]
+            for slot, counts in self.token_counts(dit).items()
+        }
+        for entries in self.adapter.patches["ref"].values():
+            for scale, source, *_ in entries:
+                _device_adapter(source, scale, device, dtype, self.adapter.device_adapters)
 
     def prepare(self, dit, x):
         key = (id(dit), tuple(x.shape[-2:]), x.device, x.dtype)
@@ -218,12 +257,14 @@ class SnapRef:
                 None if ids is None else ids.unsqueeze(0).to(x.device),
                 None if weights is None else weights.unsqueeze(0).unsqueeze(-1).to(x.device, x.dtype))
             try:
-                records = {}
+                records = self.buffers[x.device, x.dtype]
+                token_counts = self.token_counts(dit)
                 for slot, refs in self.refs.items():
-                    encoded = [_encode_reference(self.adapter, dit, ref.to(x.device, x.dtype), context, x.shape[-2:], self.mode)
-                               for ref in refs]
-                    records[slot] = [tuple(torch.cat([record[block][kv] for record in encoded], dim=1)
-                                          for kv in (0, 1)) for block in range(len(dit.blocks))]
+                    offset = 0
+                    for ref, count in zip(refs, token_counts[slot]):
+                        record = [tuple(value[:, offset:offset + count] for value in block) for block in records[slot]]
+                        _encode_reference(self.adapter, dit, ref.to(x.device, x.dtype), context, x.shape[-2:], self.mode, record)
+                        offset += count
                 self.adapter.cache[key] = records
             except Exception as exc:
                 self.adapter.clear()
