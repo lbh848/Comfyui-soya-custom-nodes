@@ -1,7 +1,10 @@
 import comfy.utils
+import asyncio
 import csv
+import gc
 import numpy as np
 import os
+import threading
 import traceback
 import urllib.request
 import onnxruntime
@@ -25,6 +28,36 @@ else:
 
 # Model cache: model_name -> InferenceSession
 _model_cache = {}
+_model_cache_lock = threading.RLock()
+
+
+def clear_model_cache():
+    # Wait for an active tag call to release its local session references.
+    with _model_cache_lock:
+        models = list(_model_cache)
+        _model_cache.clear()
+        if models:
+            gc.collect()
+        print(f"[Soya WD14] Memory cleanup: released {len(models)} cached models: {models}")
+        return len(models)
+
+
+def register_memory_cleanup():
+    from aiohttp import web
+    from server import PromptServer
+
+    @web.middleware
+    async def memory_cleanup(request, handler):
+        response = await handler(request)
+        if (request.method == "POST" and request.path in {"/free", "/api/free"}
+                and 200 <= response.status < 300):
+            body = await request.json()
+            if body.get("unload_models") or body.get("free_memory"):
+                released = await asyncio.to_thread(clear_model_cache)
+                response.headers["X-Soya-WD14-Released-Models"] = str(released)
+        return response
+
+    PromptServer.instance.app.middlewares.append(memory_cleanup)
 
 HF_MODELS = {
     "wd-eva02-large-tagger-v3": "SmilingWolf/wd-eva02-large-tagger-v3",
@@ -145,6 +178,12 @@ class SoyaWD14Tagger_mdsoya:
 
     def tag(self, image, model, threshold=0.35, character_threshold=0.85,
             replace_underscore=True, trailing_comma=False, exclude_tags=""):
+        with _model_cache_lock:
+            return self._tag(image, model, threshold, character_threshold,
+                             replace_underscore, trailing_comma, exclude_tags)
+
+    def _tag(self, image, model, threshold, character_threshold,
+             replace_underscore, trailing_comma, exclude_tags):
         tensor = (image.cpu().numpy() * 255).astype(np.uint8)
         pbar = comfy.utils.ProgressBar(tensor.shape[0])
         results = []
