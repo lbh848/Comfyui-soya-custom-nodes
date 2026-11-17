@@ -49,7 +49,7 @@ from .soya_strip_extension import SoyaStripExtension_mdsoya
 from .soya_short_side import SoyaShortSide_mdsoya
 from .soya_to_string import SoyaToString_mdsoya
 from .soya_wd14_tagger import SoyaWD14Tagger_mdsoya, register_memory_cleanup
-from .soya_anima_tagger import SoyaAnimaTagger_mdsoya
+from .soya_anima_tagger import SoyaAnimaTagger_mdsoya, register_anima_tagger_memory_cleanup
 from .soya_ipadapter_embed_cache import SoyaIPAdapterEmbedCache_mdsoya
 from .soya_ipadapter_embeds_toggle import SoyaIPAdapterEmbedsToggle_mdsoya
 from .soya_face_embed_cache import SoyaFaceEmbedCache_mdsoya
@@ -285,6 +285,7 @@ from .soya_model_manager import WEB_DIRECTORY as _mm_web  # noqa: F401
 
 # Set up API routes
 register_memory_cleanup()
+register_anima_tagger_memory_cleanup()
 
 try:
     from .soya_scheduler.server import setup_routes

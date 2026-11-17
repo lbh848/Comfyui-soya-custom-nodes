@@ -1,8 +1,12 @@
-"""Anima Tagger worker; download missing models, then tag the input batch."""
+"""Load Anima Tagger once and serve image requests from ComfyUI over stdin."""
 
 import argparse
 import json
 from pathlib import Path
+import sys
+
+
+RESULT_PREFIX = "SOYA_ANIMA_TAGGER_RESULT "
 
 
 def build_output_rules(tagger, exclude_tags, include_rating, include_character, include_copyright):
@@ -30,12 +34,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--models-dir", type=Path, required=True)
     parser.add_argument("--device", required=True)
-    parser.add_argument("--input-dir", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--exclude-tags", default="")
-    parser.add_argument("--include-rating", action="store_true")
-    parser.add_argument("--include-character", action="store_true")
-    parser.add_argument("--include-copyright", action="store_true")
     args = parser.parse_args()
 
     # Keep optional ML imports inside this worker, outside ComfyUI node discovery.
@@ -59,16 +57,19 @@ def main():
     print("Checking Anima Tagger backbone; missing files download automatically (about 2 GB).", flush=True)
     ensure_tagger_backbone(checkpoint)
     tagger = AnimaTagger(ckpt_dir=checkpoint, device=args.device)
-    output_rules = build_output_rules(
-        tagger, args.exclude_tags, args.include_rating, args.include_character, args.include_copyright,
-    )
-    captions = []
-    for path in sorted(args.input_dir.glob("*.png")):
-        with Image.open(path) as image:
-            caption = tagger.predict_caption(image)
-            captions.append(", ".join(parse_caption(caption, output_rules)))
-    args.output.write_text(json.dumps(captions, ensure_ascii=False), encoding="utf-8")
-    print(f"Tagged {len(captions)} images with Anima Tagger.")
+    for line in sys.stdin:
+        request = json.loads(line)
+        output_rules = build_output_rules(
+            tagger, request["exclude_tags"], request["include_rating"],
+            request["include_character"], request["include_copyright"],
+        )
+        captions = []
+        for path in sorted(Path(request["input_dir"]).glob("*.png")):
+            with Image.open(path) as image:
+                caption = tagger.predict_caption(image)
+                captions.append(", ".join(parse_caption(caption, output_rules)))
+        print(f"Tagged {len(captions)} images with Anima Tagger.", flush=True)
+        print(RESULT_PREFIX + json.dumps(captions), flush=True)
 
 
 if __name__ == "__main__":
