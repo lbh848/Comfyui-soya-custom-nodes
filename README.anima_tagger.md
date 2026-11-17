@@ -6,6 +6,12 @@
 sidecar head, tag rules, category order, and image preprocessing. It performs no
 subject segmentation. An image batch returns one caption per image.
 
+The node's `제외할 태그` (`exclude_tags`) field removes comma-separated tag names
+from the final caption. It defaults to `safe, sensitive, nsfw, explicit, original`.
+Counts such as `1girl`, character names, franchise names, and appearance tags
+remain unless explicitly excluded. Names match complete tags, with underscores
+normalized to spaces. Leave the field empty to retain every upstream output tag.
+
 The MIT-licensed inference source is included unchanged under
 `third_party/anime_tools`. `UPSTREAM.json` records the exact commit and every
 included file's SHA-256. This avoids installing the upstream training, OCR,

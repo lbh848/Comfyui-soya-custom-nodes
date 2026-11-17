@@ -11,6 +11,7 @@ def main():
     parser.add_argument("--device", required=True)
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--exclude-tags", default="")
     args = parser.parse_args()
 
     # Keep optional ML imports inside this worker, outside ComfyUI node discovery.
@@ -18,6 +19,7 @@ def main():
     from anime_tools.downloads import ensure
     from anime_tools.tagger.fetch import ensure_tagger_backbone
     from anime_tools.tagger import AnimaTagger
+    from anime_tools.captions.tag_rules import from_dict, parse_caption
     from PIL import Image
 
     checkpoint = args.models_dir / "anima-tagger-pixai"
@@ -33,10 +35,15 @@ def main():
     print("Checking Anima Tagger backbone; missing files download automatically (about 2 GB).", flush=True)
     ensure_tagger_backbone(checkpoint)
     tagger = AnimaTagger(ckpt_dir=checkpoint, device=args.device)
+    output_rules = from_dict({
+        "remove": [tag.strip().lower().replace("_", " ")
+                   for tag in args.exclude_tags.split(",") if tag.strip()],
+    })
     captions = []
     for path in sorted(args.input_dir.glob("*.png")):
         with Image.open(path) as image:
-            captions.append(tagger.predict_caption(image))
+            caption = tagger.predict_caption(image)
+            captions.append(", ".join(parse_caption(caption, output_rules)))
     args.output.write_text(json.dumps(captions, ensure_ascii=False), encoding="utf-8")
     print(f"Tagged {len(captions)} images with Anima Tagger.")
 

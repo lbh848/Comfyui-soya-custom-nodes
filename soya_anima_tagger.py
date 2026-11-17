@@ -16,6 +16,9 @@ import numpy as np
 from PIL import Image
 
 
+DEFAULT_EXCLUDE_TAGS = "safe, sensitive, nsfw, explicit, original"
+
+
 class SoyaAnimaTagger_mdsoya(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -27,12 +30,17 @@ class SoyaAnimaTagger_mdsoya(io.ComfyNode):
             inputs=[
                 io.Image.Input("image"),
                 io.Combo.Input("device", options=["auto", "cpu"], default="auto"),
+                io.String.Input(
+                    "exclude_tags", display_name="제외할 태그", default=DEFAULT_EXCLUDE_TAGS,
+                    multiline=True, optional=True,
+                    tooltip="쉼표로 구분한 태그를 출력에서 제외합니다. 비우면 모두 출력합니다.",
+                ),
             ],
             outputs=[io.String.Output("tags", is_output_list=True)],
         )
 
     @classmethod
-    def execute(cls, image, device):
+    def execute(cls, image, device, exclude_tags=DEFAULT_EXCLUDE_TAGS):
         models_dir = Path(folder_paths.models_dir).resolve() / "captioners"
         if device not in {"auto", "cpu"}:
             raise ValueError(f"Unsupported Anima Tagger device: {device}")
@@ -59,6 +67,7 @@ class SoyaAnimaTagger_mdsoya(io.ComfyNode):
                 sys.executable, "-u", str(Path(__file__).with_name("soya_anima_tagger_runtime.py")),
                 "--models-dir", str(models_dir), "--device", str(torch_device),
                 "--input-dir", str(directory), "--output", str(result_path),
+                "--exclude-tags", exclude_tags,
             ]
             if device == "auto" and torch_device.type != "cpu":
                 # Leave room for the tagger weights and 1008px inference workspace.
