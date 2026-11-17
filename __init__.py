@@ -49,6 +49,7 @@ from .soya_strip_extension import SoyaStripExtension_mdsoya
 from .soya_short_side import SoyaShortSide_mdsoya
 from .soya_to_string import SoyaToString_mdsoya
 from .soya_wd14_tagger import SoyaWD14Tagger_mdsoya, register_memory_cleanup
+from .soya_anima_tagger import SoyaAnimaTagger_mdsoya
 from .soya_ipadapter_embed_cache import SoyaIPAdapterEmbedCache_mdsoya
 from .soya_ipadapter_embeds_toggle import SoyaIPAdapterEmbedsToggle_mdsoya
 from .soya_face_embed_cache import SoyaFaceEmbedCache_mdsoya
@@ -141,6 +142,7 @@ NODE_CLASS_MAPPINGS = {
     "SoyaShortSide_mdsoya": SoyaShortSide_mdsoya,
     "SoyaToString_mdsoya": SoyaToString_mdsoya,
     "SoyaWD14Tagger_mdsoya": SoyaWD14Tagger_mdsoya,
+    "SoyaAnimaTagger_mdsoya": SoyaAnimaTagger_mdsoya,
     "SoyaIPAdapterEmbedCache_mdsoya": SoyaIPAdapterEmbedCache_mdsoya,
     "SoyaIPAdapterEmbedsToggle_mdsoya": SoyaIPAdapterEmbedsToggle_mdsoya,
     "SoyaFaceEmbedCache_mdsoya": SoyaFaceEmbedCache_mdsoya,
@@ -232,6 +234,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SoyaShortSide_mdsoya": "Short Side (Soya)",
     "SoyaToString_mdsoya": "To String (Soya)",
     "SoyaWD14Tagger_mdsoya": "WD14 Tagger (Soya)",
+    "SoyaAnimaTagger_mdsoya": "Anima Tagger (Soya)",
     "SoyaIPAdapterEmbedCache_mdsoya": "IPAdapter Embed Cache (Soya)",
     "SoyaIPAdapterEmbedsToggle_mdsoya": "IPAdapter Embeds Toggle (Soya)",
     "SoyaFaceEmbedCache_mdsoya": "Face Embed Cache (Soya)",

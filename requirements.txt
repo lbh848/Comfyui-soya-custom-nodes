@@ -4,3 +4,8 @@ ray
 spandrel
 sam2
 insightface
+timm>=1.0
+transformers>=5.16
+huggingface-hub>=0.30
+PyYAML
+safetensors>=0.5

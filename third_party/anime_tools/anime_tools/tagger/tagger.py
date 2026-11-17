@@ -1,0 +1,559 @@
+"""AnimaTagger — multi-label tagger over the Anima caption vocabulary.
+
+Public surface: ``predict`` / ``predict_caption``. Checkpoint dir is
+``config.json`` + ``vocab.json`` + ``rules.yaml`` + ``thresholds.safetensors``,
+optionally ``groups.yaml`` (group-aware prediction: one argmax winner per
+``softmax``/``softmax_when_solo`` group instead of the sigmoid threshold) and
+``sidecar.safetensors``. See ``docs/anima_tagger.md``.
+
+Everything after the score vector — thresholds, softmax groups, count dedupe,
+character floor, top-1 artist, slot order — is post-processing of
+``{tag: prob}``. Captions come out in ``SLOT_ORDER`` with underscores replaced
+by spaces (Anima's training-time T5 input).
+
+The two halves that need no torch live beside this one and are re-exported from
+it, so the vocab build and the ComfyUI node can reach them without loading a
+model: :mod:`anime_tools.tagger.schema` (what a tag means to a checkpoint) and
+:mod:`anime_tools.tagger.fetch` (getting one onto disk).
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Sequence
+from pathlib import Path
+
+import torch
+from PIL import Image
+from safetensors.torch import load_file as st_load
+
+from anime_tools._device import resolve_device
+from anime_tools._json import read_json
+from anime_tools.captions import tag_groups as tg
+from anime_tools.captions import tag_rules as tr
+from anime_tools.captions.taxonomy import classify_people, is_solo_names
+from anime_tools.captions.vocab_io import load_vocab
+from anime_tools.tagger._backbone import (
+    UNSUPPORTED_LOGIT,
+    SidecarHead,
+    align_vocab,
+    default_dtype,
+    probs_to_logits,
+    rename_recovery_from_rules,
+)
+from anime_tools.tagger.backends import Backend, build_backend
+
+# Re-exported from the three torch-free leaves; callers import them from here.
+from anime_tools.tagger.dbv4_meta import (
+    BACKBONES,
+    DEFAULT_TAGGER_DIR,
+)
+from anime_tools.tagger.fetch import (
+    ensure_tagger_backbone,
+    ensure_tagger_checkpoint,
+    is_backbone_dir,
+)
+from anime_tools.tagger.schema import (
+    GIRLS_COUNT_RE,
+    PEOPLE_COUNT_LABELS,
+    RATINGS,
+    SLOT_ORDER,
+    TAG_TYPE_NAMES,
+    TagEntry,
+    dedupe_count_tags,
+    fix_artist_category,
+    underscore_to_space,
+)
+
+__all__ = [
+    "PEOPLE_COUNT_LABELS",
+    "RATINGS",
+    "SLOT_ORDER",
+    "TAG_TYPE_NAMES",
+    "AnimaTagger",
+    "dedupe_count_tags",
+    "ensure_tagger_backbone",
+    "ensure_tagger_checkpoint",
+    "is_backbone_dir",
+]
+
+logger = logging.getLogger(__name__)
+
+
+def _load_thresholds(path: Path, n_tags: int, default: float = 0.5) -> torch.Tensor:
+    if not path.exists():
+        logger.warning(
+            "no thresholds.safetensors at %s - using default=%.2f", path, default
+        )
+        return torch.full((n_tags,), default)
+    d = st_load(str(path))
+    t = d["thresholds"]
+    if t.shape != (n_tags,):
+        raise ValueError(f"thresholds shape {tuple(t.shape)} != ({n_tags},)")
+    return t
+
+
+class AnimaTagger:
+    """Multi-label tagger over the Anima-distribution vocabulary."""
+
+    def __init__(
+        self,
+        ckpt_dir: str | Path = DEFAULT_TAGGER_DIR,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+        character_floor: float = 0.5,
+    ):
+        self.ckpt_dir = Path(ckpt_dir)
+        self.device = torch.device(resolve_device(device))
+        self.dtype = dtype if dtype is not None else default_dtype(self.device)
+        # Absolute confidence floor for characters, above the per-tag F1
+        # threshold (some F1 thresholds are ~0.05, too permissive on its own).
+        self._character_floor = float(character_floor)
+
+        cfg_d = read_json(self.ckpt_dir / "config.json")
+        self._cfg_d = cfg_d
+        # No ``backend`` key means the config predates the backbones: it is the
+        # legacy in-house head, refused below (not defaulted to a live backbone,
+        # which would load a pe vocab against the wrong card).
+        self.backend_kind: str = str(cfg_d.get("backend", "pe"))
+        if self.backend_kind not in BACKBONES:
+            raise ValueError(
+                f"unsupported tagger backend {self.backend_kind!r} in "
+                f"{self.ckpt_dir / 'config.json'}: the legacy in-house 'pe' "
+                "dual-encoder head was removed 2026-08-30. Use a backbone-backed "
+                f"checkpoint ({' / '.join(sorted(BACKBONES))}; default "
+                f"{DEFAULT_TAGGER_DIR}; `python -m anime_tools.downloads tagger` or "
+                "`python -m anime_tools.tagger.cli.build_ckpt`)."
+            )
+        self._backend: Backend | None = None
+        self._sidecar: SidecarHead | None = None
+
+        self._load_vocab_tables()
+        self.n_tags = len(self.tag_entries)
+        self.rules = tr.load_rules(self.ckpt_dir / "rules.yaml")
+        self._init_backend(cfg_d)
+        if int(self.cfg.n_tags) != self.n_tags:
+            raise ValueError(
+                f"vocab.json has {self.n_tags} tags but the head expects {self.cfg.n_tags}"
+            )
+
+        self.thresholds = _load_thresholds(
+            self.ckpt_dir / "thresholds.safetensors", n_tags=self.n_tags
+        )
+        self.thresholds_dev = self.thresholds.to(self.device)
+        # Attached to every ``predict`` output so a consumer can tell how far a
+        # score fell short (the position-clause bag relaxation reads it).
+        self.threshold_map: dict[str, float] = {
+            e.name: float(t) for e, t in zip(self.tag_entries, self.thresholds)
+        }
+
+        self._load_groups()
+
+    def _load_vocab_tables(self) -> None:
+        """``vocab.json`` → the entry list and the lookups built from it once:
+        per-slot emit order, category / sentinel views by name."""
+        vocab = load_vocab(self.ckpt_dir)
+        self.tag_entries: list[TagEntry] = [
+            TagEntry(
+                name=t["name"],
+                index=int(t["index"]),
+                category=fix_artist_category(str(t["category"]), t["name"]),
+                median_pos=float(t.get("median_pos", 0.0)),
+            )
+            for t in vocab["tags"]
+        ]
+        self.ratings: list[str] = list(vocab["ratings"])
+        # empty = legacy/disabled checkpoint (no people-count head, n_people_counts == 0)
+        self.people_count_labels: list[str] = list(
+            vocab.get("people_count_labels") or []
+        )
+        # "original" copyright index; the uncertainty-fallback in predict()
+        # when a character misses _character_floor.
+        self._original_idx: int | None = next(
+            (
+                e.index
+                for e in self.tag_entries
+                if e.name == "original" and e.category == "copyright"
+            ),
+            None,
+        )
+        self._by_cat: dict[str, list[tuple[int, float, str]]] = {}
+        for e in self.tag_entries:
+            cat = e.category if e.category in SLOT_ORDER else "general"
+            self._by_cat.setdefault(cat, []).append((e.index, e.median_pos, e.name))
+        for cat in self._by_cat:
+            self._by_cat[cat].sort(key=lambda triple: (triple[1], triple[2]))
+        # The slot a tag is emitted into, and its order inside that slot — the
+        # same ``(median_pos, name)`` key ``_by_cat`` is sorted on.
+        self._slot_of: dict[str, str] = {
+            name: cat for cat, entries in self._by_cat.items() for _, _, name in entries
+        }
+        self._emit_key: dict[str, tuple[float, str]] = {
+            name: (pos, name)
+            for entries in self._by_cat.values()
+            for _, pos, name in entries
+        }
+        # Row-order views of the vocabulary, built once. Every question the
+        # post-processing below asks about a *kept* tag — its category, its
+        # index — used to walk all ~13k entries to answer it, five times per
+        # image; keyed by name they are all lookups over the kept handful.
+        self._tag_names: tuple[str, ...] = tuple(e.name for e in self.tag_entries)
+        self._emit_ok: tuple[bool, ...] = tuple(
+            not tg.is_sentinel_name(n) for n in self._tag_names
+        )
+        self._cat_of: dict[str, str] = {e.name: e.category for e in self.tag_entries}
+
+    def _load_groups(self) -> None:
+        """The optional ``groups.yaml`` snapshot → ``_group_lookup``, one entry
+        per ``softmax`` / ``softmax_when_solo`` group (sentinel slot appended)."""
+        # None when missing (older/flat-vocab).
+        groups_path = self.ckpt_dir / "groups.yaml"
+        self._groups: tg.TagGroups | None = None
+        self._group_lookup: dict[str, dict] = {}
+        if groups_path.exists():
+            self._groups = tg.load_groups(groups_path)
+            tag_to_idx = {e.name: e.index for e in self.tag_entries}
+            for g in self._groups.groups:
+                if g.mode not in ("softmax", "softmax_when_solo"):
+                    continue
+                tag_idx = [tag_to_idx[t] for t in g.tags if t in tag_to_idx]
+                if not tag_idx:
+                    continue
+                # sentinel groups carry a synthetic "<none:group>" slot, appended
+                # so argmax can pick "none of these" and emit nothing.
+                sentinel_local: int | None = None
+                if g.sentinel:
+                    s_idx = tag_to_idx.get(tg.sentinel_tag_name(g.name))
+                    if s_idx is not None:
+                        sentinel_local = len(tag_idx)
+                        tag_idx.append(s_idx)
+                self._group_lookup[g.name] = {
+                    "mode": g.mode,
+                    "tag_idx": torch.tensor(
+                        tag_idx, dtype=torch.long, device=self.device
+                    ),
+                    "tag_names": tuple(g.tags),
+                    "escape_names": tuple(g.escape),
+                    "sentinel_local": sentinel_local,
+                }
+
+    def _init_backend(self, cfg_d: dict) -> None:
+        """External backbone tagger projected onto our vocab (+ optional sidecar)."""
+        from types import SimpleNamespace
+
+        self._backend = build_backend(cfg_d, device=self.device, dtype=self.dtype)
+        # readback / bench read ``cfg.n_tags``; the pool kinds are vestigial.
+        self.cfg = SimpleNamespace(
+            n_tags=self.n_tags, pool_kind=None, pool_kind_aux=None
+        )
+        vocab_tags = [
+            {"name": e.name, "index": e.index, "category": e.category}
+            for e in self.tag_entries
+        ]
+        self._align = align_vocab(
+            vocab_tags, self._backend.card, rename_recovery_from_rules(self.rules)
+        )
+        self._align_ours = self._align.ours_idx
+        self._align_ext = self._align.ext_idx
+        self._supported = self._align.supported_mask(self.n_tags)
+        self._rating_cols = [
+            self._backend.card.rating_cols.get(r) for r in self.ratings
+        ]
+        self._sidecar = SidecarHead.load(self.ckpt_dir)
+        if self._sidecar is not None:
+            self._sidecar.to(self.device)
+            self._sidecar_bce_idx = torch.tensor(
+                self._sidecar.bce_indices, dtype=torch.long
+            )
+            self._supported[self._sidecar_bce_idx] = True
+            if (
+                self._sidecar.people_count_labels
+                and list(self._sidecar.people_count_labels) != self.people_count_labels
+            ):
+                raise ValueError("sidecar people_count_labels disagree with vocab.json")
+        logger.info(
+            "AnimaTagger[%s]: %s → %d/%d vocab tags supported (unmatched by "
+            "category: %s); sidecar=%s",
+            self.backend_kind,
+            self._backend.repo,
+            int(self._supported.sum()),
+            self.n_tags,
+            self._align.unmatched_by_category,
+            "none"
+            if self._sidecar is None
+            else f"{self._sidecar.n_bce} bce + "
+            f"{len(self._sidecar.people_count_labels)} people",
+        )
+
+    @torch.no_grad()
+    def _heads_forward_batch(
+        self, images: Sequence[Image.Image]
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Head pass over many images: backbone + optional sidecar →
+        ``(tag_logits [B, n_tags], rating_probs [B, n_ratings], people_probs
+        [B, n_people] | None)`` on ``self.device``.
+
+        Tag logits are the projected sigmoid probs mapped back through logit();
+        tags the backend cannot emit sit at ``UNSUPPORTED_LOGIT``, so they never
+        clear a threshold or win a group argmax.
+
+        The backend has always taken a list — this is the one forward that
+        covers a whole batch, and :meth:`_heads_forward` is its one-image case.
+        """
+        out = self._backend.forward(list(images))
+        b = int(out.probs.shape[0])
+        probs = torch.zeros(b, self.n_tags)
+        probs[:, self._align_ours] = out.probs[:, self._align_ext]
+        people: torch.Tensor | None = None
+        if self._sidecar is not None:
+            bce, people_logits = self._sidecar(out.hidden.to(self.device))
+            probs[:, self._sidecar_bce_idx] = bce.float().sigmoid().cpu()
+            if people_logits is not None:
+                people = people_logits.float().softmax(dim=-1)
+        tag_logits = probs_to_logits(probs)
+        tag_logits[:, ~self._supported] = UNSUPPORTED_LOGIT
+        # Backbone ratings are 4 independent sigmoids; normalise to a distribution.
+        rating = torch.zeros(b, len(self._rating_cols))
+        for j, col in enumerate(self._rating_cols):
+            if col is not None:
+                rating[:, j] = out.probs[:, col]
+        rating = rating / rating.sum(dim=1, keepdim=True).clamp(min=1e-6)
+        return tag_logits.to(self.device), rating.to(self.device), people
+
+    @torch.no_grad()
+    def _heads_forward(
+        self, pil_img: Image.Image
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """:meth:`_heads_forward_batch` for one image, rows unwrapped."""
+        logits, rating, people = self._heads_forward_batch([pil_img])
+        return logits[0], rating[0], None if people is None else people[0]
+
+    @torch.no_grad()
+    def tag_logits(self, pil_img: Image.Image) -> torch.Tensor:
+        """Image → raw ``[n_tags]`` tag logits (float32, cpu)."""
+        return self._heads_forward(pil_img)[0].float().cpu()
+
+    @torch.no_grad()
+    def predict(self, pil_img: Image.Image) -> dict[str, object]:
+        """Run one image through the head; return raw + thresholded outputs.
+
+        Returns a dict with ``rating`` / ``rating_scores``; ``people_count`` /
+        ``people_count_scores`` (absent on legacy checkpoints without the
+        people head); ``scores`` (all in-vocab tag probs); ``kept`` (emitted
+        positives — softmax-group winners are picked by argmax, not sigmoid
+        threshold, when typed groups are loaded); and ``groups``
+        (``{group_name: predicted_tag_or_None}``, only when groups loaded).
+        """
+        return self._predict_row(*self._heads_forward(pil_img))
+
+    @torch.no_grad()
+    def predict_batch(self, images: Sequence[Image.Image]) -> list[dict[str, object]]:
+        """:meth:`predict` over a list of images — one forward for the batch.
+
+        The post-processing is per image and untouched, so a batch of one
+        answers exactly what :meth:`predict` does. This is the entry point a
+        walk over a tree should use; the per-image one leaves the backbone
+        waiting on the next decode.
+        """
+        if not images:
+            return []
+        logits, rating, people = self._heads_forward_batch(images)
+        return [
+            self._predict_row(
+                logits[i], rating[i], None if people is None else people[i]
+            )
+            for i in range(len(logits))
+        ]
+
+    def _predict_row(
+        self,
+        tag_logits_row: torch.Tensor,
+        rating_probs: torch.Tensor,
+        people_probs: torch.Tensor | None,
+    ) -> dict[str, object]:
+        """One image's head outputs → the :meth:`predict` dict.
+
+        Everything here is Python over the kept handful of tags, so the tensors
+        come off the device once, as lists, rather than a ``float()`` per
+        element.
+        """
+        tag_probs = tag_logits_row.sigmoid()
+        kept_mask = (tag_probs >= self.thresholds_dev).tolist()
+        probs: list[float] = tag_probs.tolist()
+        names = self._tag_names
+        scores = dict(zip(names, probs, strict=True))
+        # sentinel slots ("<none:group>") stay in `scores` but are never emitted
+        kept = {
+            name: p
+            for name, p, hit, emit in zip(
+                names, probs, kept_mask, self._emit_ok, strict=True
+            )
+            if hit and emit
+        }
+        rating_list: list[float] = rating_probs.tolist()
+        rating_idx = max(range(len(rating_list)), key=rating_list.__getitem__)
+        out: dict[str, object] = {
+            "rating": self.ratings[rating_idx],
+            "rating_scores": dict(zip(self.ratings, rating_list, strict=True)),
+            "scores": scores,
+            "kept": kept,
+            # A shared reference, not a copy — treat as read-only.
+            "thresholds": self.threshold_map,
+        }
+        if people_probs is not None and self.people_count_labels:
+            people_list: list[float] = people_probs.tolist()
+            people_idx = max(range(len(people_list)), key=people_list.__getitem__)
+            out["people_count"] = self.people_count_labels[people_idx]
+            out["people_count_scores"] = dict(
+                zip(self.people_count_labels, people_list, strict=True)
+            )
+
+        # Group-aware refinement: one argmax winner per applicable group.
+        if self._group_lookup:
+            out["groups"] = self._refine_groups(kept, tag_logits_row, probs)
+
+        dedupe_count_tags(kept)
+
+        # People-count from the emitted count tags, bucketed by the rule the
+        # vocab build labels by, so it agrees with the ``Ngirls`` tags the
+        # position-clause pipeline reads. The sidecar distribution stays in
+        # ``people_count_scores``.
+        if self.people_count_labels:
+            people_idx = classify_people(n.replace(" ", "_") for n in kept)
+            out["people_count"] = self.people_count_labels[people_idx]
+            out["people_count_source"] = "count-tag-rule"
+
+        self._cap_slots(kept, probs)
+        out["kept"] = kept
+        return out
+
+    def _refine_groups(
+        self, kept: dict[str, float], tag_logits_row: torch.Tensor, probs: list[float]
+    ) -> dict[str, str | None]:
+        """Replace each applicable group's thresholded members in ``kept`` (in
+        place) with its argmax winner; ``{group: winner or None}``."""
+        names = self._tag_names
+        kept_names = set(kept.keys())
+        is_solo = is_solo_names(kept_names)
+        group_preds: dict[str, str | None] = {}
+        for name, info in self._group_lookup.items():
+            mode = info["mode"]
+            escape_fired = bool(kept_names & set(info["escape_names"]))
+            if mode == "softmax_when_solo":
+                applicable = is_solo and not escape_fired
+            else:  # "softmax"
+                applicable = not escape_fired
+            if not applicable:
+                # Leave the group's tags as the per-tag threshold decided.
+                group_preds[name] = None
+                continue
+            idx_t = info["tag_idx"]
+            group_logits = tag_logits_row.index_select(0, idx_t)
+            winner_local = int(group_logits.argmax().item())
+            for t in info["tag_names"]:
+                kept.pop(t, None)
+            if winner_local == info.get("sentinel_local"):
+                # "None of these" won — the group emits nothing.
+                group_preds[name] = None
+                continue
+            winner_idx = int(idx_t[winner_local].item())
+            # No backbone was CE-trained on our groups, so the winner must
+            # also clear its own threshold ("at most one"): otherwise an
+            # all-unsupported group emits its first member off a -30 logit.
+            if probs[winner_idx] < self.thresholds[winner_idx]:
+                group_preds[name] = None
+                continue
+            winner_name = names[winner_idx]
+            kept[winner_name] = probs[winner_idx]
+            group_preds[name] = winner_name
+        return group_preds
+
+    def _cap_slots(self, kept: dict[str, float], probs: list[float]) -> None:
+        """The booru slot conventions, in place on ``kept``: characters capped
+        at the girls count and floored, ``original`` as the empty-IP filler,
+        one artist."""
+        # cap characters to the largest digit-prefixed girls-count in `kept`
+        girl_caps = [
+            int(m.group(1)) for name in kept if (m := GIRLS_COUNT_RE.match(name))
+        ]
+        if girl_caps:
+            cap = max(girl_caps)
+            for _, name in self._scored(kept, "character")[cap:]:
+                kept.pop(name, None)
+
+        # drop characters below the floor; if that empties both character and
+        # copyright, add "original" as a slot-filler (booru non-IP convention)
+        dropped_any = False
+        for _, name in self._scored(kept, "character"):
+            if kept[name] < self._character_floor:
+                kept.pop(name, None)
+                dropped_any = True
+        if dropped_any and self._original_idx is not None:
+            cats = {self._cat_of.get(name) for name in kept}
+            if not cats & {"character", "copyright"}:
+                kept["original"] = probs[self._original_idx]
+
+        # cap artist to top-1 by score (booru convention is one per work).
+        # Copyright is not capped: a work under a parent franchise carries
+        # both (``fate (series)`` + ``fate/grand order``), and a top-1 cap cost
+        # copyright recall 0.95 → 0.81 on the val split. ``original`` gives way
+        # to any franchise copyright beside it.
+        for _, name in self._scored(kept, "artist")[1:]:
+            kept.pop(name, None)
+        if "original" in kept and len(self._scored(kept, "copyright")) > 1:
+            kept.pop("original")
+
+    def _scored(self, kept: dict[str, float], category: str) -> list[tuple[float, str]]:
+        """``kept``'s tags of one category, highest score first.
+
+        Over ``kept`` rather than the vocabulary: the answer is the same set,
+        and the vocabulary is three orders of magnitude longer.
+        """
+        return sorted(
+            (
+                (p, name)
+                for name, p in kept.items()
+                if self._cat_of.get(name) == category
+            ),
+            reverse=True,
+        )
+
+    def predict_caption(self, pil_img: Image.Image, min_confidence: float = 0.0) -> str:
+        """Image → canonical Anima caption string (rating + slotted tags).
+
+        ``min_confidence`` (0-1) is an extra probability floor on top of the
+        per-tag F1 thresholds; 0.0 (default) leaves them untouched. The
+        rating slot is always emitted regardless of this floor.
+        """
+        return self._caption_of(self.predict(pil_img), min_confidence)
+
+    def predict_caption_batch(
+        self, images: Sequence[Image.Image], min_confidence: float = 0.0
+    ) -> list[str]:
+        """:meth:`predict_caption` over a list of images — one forward for the
+        batch (:meth:`predict_batch`), one caption out per image in order."""
+        return [
+            self._caption_of(out, min_confidence) for out in self.predict_batch(images)
+        ]
+
+    def _caption_of(self, out: dict[str, object], min_confidence: float) -> str:
+        """One :meth:`predict` dict → the caption string."""
+        kept = out["kept"]
+        if min_confidence > 0.0:
+            kept = {name: p for name, p in kept.items() if p >= min_confidence}
+        slotted: dict[str, list[str]] = {cat: [] for cat in SLOT_ORDER}
+        slotted["rating"].append(out["rating"])
+        for name in kept:
+            slotted.setdefault(self._slot_of.get(name, "general"), []).append(name)
+        for cat, tags in slotted.items():
+            if cat != "rating":
+                tags.sort(key=lambda n: self._emit_key.get(n, (0.0, n)))
+        # Re-apply tag rules at emit time: the model can predict both `bra` and
+        # `black bra`; apply_rules drops `bra` in that case.
+        flat: list[str] = []
+        for cat in SLOT_ORDER:
+            flat.extend(slotted.get(cat, []))
+        rating_held = flat[:1]
+        rest = tr.apply_rules(flat[1:], self.rules)
+        out_tags = rating_held + rest
+        return ", ".join(underscore_to_space(t) for t in out_tags)

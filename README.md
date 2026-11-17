@@ -135,3 +135,9 @@ The final applied token mask is published as `soya_dynamic_mask` UI metadata in
 Comfy history and a temporary PNG for the backend's STEP6 overlay. Input masks
 are never overwritten. The detector stays on CPU; per-execution GPU caches are
 released at completion or failure.
+
+## Anima Tagger
+
+Whole-image tagging is available through **Anima Tagger (Soya)**. See
+[setup and licenses](README.anima_tagger.md). Missing models download automatically
+on first use. You can also download them separately before running.

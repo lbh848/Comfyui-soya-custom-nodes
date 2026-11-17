@@ -1,0 +1,148 @@
+"""Where every model weight lives — the one spelling of each repo, filename and
+destination path. Torch-free, and the leaf of this package: the loaders import
+their repo / filename / default path from here (through
+:mod:`anime_tools.downloads`, which re-exports it) so a Download button cannot
+write where a loader will not look.
+
+Destinations are of two kinds: a path under the curation home (``models/…``),
+where a ``--checkpoint`` / ``--tagger_dir`` default points, so the file has to
+land exactly there; or the HuggingFace hub cache, for assets whose loader
+fetches by repo id — probed with :func:`anime_tools._hf.hf_file_cached`, never
+by guessing a cache path.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from anime_tools._env import models_dir, resolve_path
+
+# The Anima Tagger — our half (vocab / rules / thresholds / groups / sidecar)
+# from ``sorryhyun/anima-tagger``. The pixai checkpoint sits under ``pixai/``;
+# the repo root still holds the dbv4 one, which every anime_tools <= 0.8
+# fetches. The backbone weights are not here: they ship from their upstream
+# repo into the hub cache (:mod:`anime_tools.tagger.dbv4_meta`).
+TAGGER_HF_REPO = "sorryhyun/anima-tagger"
+TAGGER_HF_SUBFOLDER = "pixai"
+DEFAULT_TAGGER_DIR = "models/captioners/anima-tagger-pixai"
+
+# SAM 3 — gated on the Hub. The CLIs pass ``--checkpoint`` with
+# ``load_from_HF=False``, so the file must land on this path, not merely in the
+# hub cache sam3's own downloader would use.
+SAM3_REPO = "facebook/sam3"
+SAM3_FILENAME = "sam3.pt"
+SAM3_DIR = "models/sam3"
+DEFAULT_SAM3_CHECKPOINT = f"{SAM3_DIR}/{SAM3_FILENAME}"
+
+# PE-Spatial-B16-512 — weights for the grouping embedder's frozen tower
+# (:mod:`anime_tools.vision.pe` builds the architecture).
+PE_SPATIAL_REPO = "facebook/PE-Spatial-B16-512"
+PE_SPATIAL_FILENAME = "PE-Spatial-B16-512.pt"
+
+# SAM3 subject soft prompt — textual inversion of ``anime girl``, the default
+# ``--prompt_embed`` of the position stage and the multiview audit. Not on the
+# Hub, so it comes straight from GitHub.
+SOFT_PROMPT_GH_REPO = "sorryhyun/anima_lora"
+SOFT_PROMPT_DIR = "networks/calibration"
+SOFT_PROMPT_FILENAME = "sam3_girl_prompt.safetensors"
+DEFAULT_SUBJECT_PROMPT_EMBED = f"{SOFT_PROMPT_DIR}/{SOFT_PROMPT_FILENAME}"
+SOFT_PROMPT_URL = (
+    f"https://raw.githubusercontent.com/{SOFT_PROMPT_GH_REPO}/main/{SOFT_PROMPT_DIR}"
+)
+
+# PaddleOCR-VL-1.6 — the 0.9 B VLM base the OCR reader is fine-tuned from
+# (Apache-2.0; ERNIE LM + NaViT tower). A flat checkpoint dir, so the remote
+# modeling files ride along with the weights. `anime_tools.ocr.reader` reads it.
+VL16_BASE_REPO = "PaddlePaddle/PaddleOCR-VL-1.6"
+VL16_BASE_FILES = (
+    "config.json",
+    "generation_config.json",
+    "model.safetensors",
+    "added_tokens.json",
+    "special_tokens_map.json",
+    "tokenizer.json",
+    "tokenizer.model",
+    "tokenizer_config.json",
+    "chat_template.jinja",
+    "preprocessor_config.json",
+    "processor_config.json",
+    "configuration_paddleocr_vl.py",
+    "image_processing_paddleocr_vl.py",
+    "modeling_paddleocr_vl.py",
+    "processing_paddleocr_vl.py",
+)
+VL16_BASE_DIR = "models/paddleocr_vl_1.6"
+
+# The manga OCR reader, **v6** under the repo's ``v6/`` subfolder: a peft LoRA
+# on the base's vision tower + projector plus its fully fine-tuned ERNIE
+# decoder layers, trained on Manga109-s / COO, KO / ZH pseudo-labelled SFX and KO speech
+# (attribution and citations on the model card). Weights only — no Manga109-s
+# image ships. ``v4/`` / ``v5/`` hold v4 / v5; the repo root still holds v3 (LM LoRA +
+# ``tower.safetensors``).
+OCR_READER_REPO = "sorryhyun/paddleocr-vl-1.6-manga-lora"
+OCR_READER_SUBFOLDER = "v6"
+OCR_READER_ADAPTER_FILES = ("adapter_config.json", "adapter_model.safetensors")
+OCR_READER_LM_FILE = "lm.safetensors"
+OCR_READER_FILES = (*OCR_READER_ADAPTER_FILES, OCR_READER_LM_FILE)
+OCR_READER_DIR = "models/paddleocr_vl_1.6_manga_lora"
+OCR_READER_REVISION = "57e7c65024d753022299340b3b9b6aafc158a79b"
+"""Hub commit of the reader the package ships — **v6** (``vl16_p2b_kozh_nl_swaprelax``:
+v5 plus 20,745 proofread Korean speech lines; v5 ``fb08a10b`` in ``v5/`` — v4's
+recipe with the labels' line breaks kept as ``\\n`` and the crops cut at the
+page edge; v4 ``926eafb1`` in ``v4/``, its 1-epoch run ``9fe3d41e``; v3
+``26292839``, v2 ``4caffe65``, v1 ``3b5fe022``, all at the repo root). The
+adapter file names are shared across versions, so the catalog row pins this and
+stamps it under the dest — an install that predates the pin re-fetches instead
+of reading an older adapter under the new name."""
+
+# The AnimeText text-block detector: a YOLO12-l trained on deepghs/AnimeText
+# (735k anime / manga pages, one class), the OCR stage's one detector.
+# **Runtime download only, never bundled**: the model card is
+# GPL-3.0 and the dataset CC-BY-NC-SA-4.0 — neither may ship inside this MIT
+# package, the trainer, or a node. ``threshold.json`` carries the card's F1
+# threshold (0.426) for reference; the detector's own default is lower.
+ANIMETEXT_REPO = "deepghs/AnimeText_yolo"
+ANIMETEXT_SUBFOLDER = "yolo12l_animetext"
+ANIMETEXT_WEIGHTS = "model.pt"
+ANIMETEXT_FILES = (ANIMETEXT_WEIGHTS, "threshold.json")
+ANIMETEXT_DIR = "models/animetext"
+
+# Danbooru tag KB — the ~114k-row classified tag table the correction pass types
+# tags against and the GUI's tag panel reads. A CSV in a GitHub repo, so it
+# rides ``_fetch_http``. Its descriptions are Korean; the English sibling is
+# built, not hosted.
+DANBOORU_TAGS_GH_REPO = "Localsmile/danbooru_KR_wiki_tag_search"
+DANBOORU_TAGS_URL = f"https://raw.githubusercontent.com/{DANBOORU_TAGS_GH_REPO}/main"
+
+# The Danbooru wiki mirrored as one parquet on the Hub — an input to the
+# ``danbooru_tags_en`` row's join, so the 45 MB file stays in the hub cache.
+DANBOORU_WIKI_REPO = "isek-ai/danbooru-wiki-2024"
+DANBOORU_WIKI_FILE = "data/train-00000-of-00001.parquet"
+
+
+def default_pe_spatial_path() -> Path:
+    """``<models_dir>/pe/PE-Spatial-B16-512.pt``."""
+    return models_dir() / "pe" / PE_SPATIAL_FILENAME
+
+
+def default_vl16_base_dir() -> Path:
+    """``<home>/models/paddleocr_vl_1.6`` — the OCR reader's base checkpoint."""
+    return resolve_path(VL16_BASE_DIR)
+
+
+def default_ocr_reader_dir() -> Path:
+    """``<home>/models/paddleocr_vl_1.6_manga_lora`` — adapter + fine-tuned
+    tower, what :class:`anime_tools.ocr.reader.OcrReader` loads."""
+    return resolve_path(OCR_READER_DIR)
+
+
+def default_animetext_dir() -> Path:
+    """``<home>/models/animetext`` — the AnimeText detector's weights, what
+    :class:`anime_tools.ocr.animetext.AnimeTextDetector` loads."""
+    return resolve_path(ANIMETEXT_DIR)
+
+
+def http_timeout() -> float:
+    """Socket timeout for the plain-HTTPS rows; shares ``ANIMA_HF_TIMEOUT``."""
+    return float(os.environ.get("ANIMA_HF_TIMEOUT", "30"))
