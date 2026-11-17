@@ -6,11 +6,20 @@
 sidecar head, tag rules, category order, and image preprocessing. It performs no
 subject segmentation. An image batch returns one caption per image.
 
-The node's `제외할 태그` (`exclude_tags`) field removes comma-separated tag names
-from the final caption. It defaults to `safe, sensitive, nsfw, explicit, original`.
-Counts such as `1girl`, character names, franchise names, and appearance tags
-remain unless explicitly excluded. Names match complete tags, with underscores
-normalized to spaces. Leave the field empty to retain every upstream output tag.
+The node has three output switches, all off by default:
+
+- `등급 태그 포함` (`include_rating`): rating labels such as `safe` and `sensitive`.
+- `캐릭터 태그 포함` (`include_character`): character names such as `hatsune miku`.
+- `작품 태그 포함` (`include_copyright`): `original` and franchises such as `vocaloid`.
+
+These switches use the checkpoint's rating labels and vocabulary categories,
+including its tag aliases, rather than a hand-maintained list of character names.
+Counts such as `1girl`, artist tags, and appearance tags remain. The node's
+`제외할 태그` (`exclude_tags`) field additionally removes comma-separated complete
+tag names, with underscores normalized to spaces; it is empty by default.
+Enable all three switches and leave this field empty to retain every upstream
+output tag. Filtering uses the upstream tag-rule engine after caption generation;
+the upstream inference code and model files are unchanged.
 
 The MIT-licensed inference source is included unchanged under
 `third_party/anime_tools`. `UPSTREAM.json` records the exact commit and every

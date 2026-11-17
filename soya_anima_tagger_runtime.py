@@ -5,6 +5,27 @@ import json
 from pathlib import Path
 
 
+def build_output_rules(tagger, exclude_tags, include_rating, include_character, include_copyright):
+    """Resolve output exclusions from the checkpoint's categories and aliases."""
+    from anime_tools.captions.tag_rules import apply_aliases, from_dict
+
+    excluded_categories = set()
+    if not include_character:
+        excluded_categories.add("character")
+    if not include_copyright:
+        excluded_categories.add("copyright")
+    excluded = apply_aliases(
+        [entry.name for entry in tagger.tag_entries if entry.category in excluded_categories],
+        tagger.rules.aliases,
+    )
+    if not include_rating:
+        excluded.extend(tagger.ratings)
+    excluded.extend(exclude_tags.split(","))
+    return from_dict({
+        "remove": [tag.strip().lower().replace("_", " ") for tag in excluded if tag.strip()],
+    })
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--models-dir", type=Path, required=True)
@@ -12,6 +33,9 @@ def main():
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--exclude-tags", default="")
+    parser.add_argument("--include-rating", action="store_true")
+    parser.add_argument("--include-character", action="store_true")
+    parser.add_argument("--include-copyright", action="store_true")
     args = parser.parse_args()
 
     # Keep optional ML imports inside this worker, outside ComfyUI node discovery.
@@ -19,7 +43,7 @@ def main():
     from anime_tools.downloads import ensure
     from anime_tools.tagger.fetch import ensure_tagger_backbone
     from anime_tools.tagger import AnimaTagger
-    from anime_tools.captions.tag_rules import from_dict, parse_caption
+    from anime_tools.captions.tag_rules import parse_caption
     from PIL import Image
 
     checkpoint = args.models_dir / "anima-tagger-pixai"
@@ -35,10 +59,9 @@ def main():
     print("Checking Anima Tagger backbone; missing files download automatically (about 2 GB).", flush=True)
     ensure_tagger_backbone(checkpoint)
     tagger = AnimaTagger(ckpt_dir=checkpoint, device=args.device)
-    output_rules = from_dict({
-        "remove": [tag.strip().lower().replace("_", " ")
-                   for tag in args.exclude_tags.split(",") if tag.strip()],
-    })
+    output_rules = build_output_rules(
+        tagger, args.exclude_tags, args.include_rating, args.include_character, args.include_copyright,
+    )
     captions = []
     for path in sorted(args.input_dir.glob("*.png")):
         with Image.open(path) as image:

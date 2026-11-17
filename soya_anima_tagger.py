@@ -16,9 +16,6 @@ import numpy as np
 from PIL import Image
 
 
-DEFAULT_EXCLUDE_TAGS = "safe, sensitive, nsfw, explicit, original"
-
-
 class SoyaAnimaTagger_mdsoya(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -31,16 +28,29 @@ class SoyaAnimaTagger_mdsoya(io.ComfyNode):
                 io.Image.Input("image"),
                 io.Combo.Input("device", options=["auto", "cpu"], default="auto"),
                 io.String.Input(
-                    "exclude_tags", display_name="제외할 태그", default=DEFAULT_EXCLUDE_TAGS,
+                    "exclude_tags", display_name="제외할 태그", default="",
                     multiline=True, optional=True,
-                    tooltip="쉼표로 구분한 태그를 출력에서 제외합니다. 비우면 모두 출력합니다.",
+                    tooltip="쉼표로 구분한 태그를 추가로 제외합니다. 비워도 꺼진 분류의 태그는 제외됩니다.",
+                ),
+                io.Boolean.Input(
+                    "include_rating", display_name="등급 태그 포함", default=False, optional=True,
+                    tooltip="safe, sensitive, nsfw, explicit 같은 등급 태그를 포함합니다.",
+                ),
+                io.Boolean.Input(
+                    "include_character", display_name="캐릭터 태그 포함", default=False, optional=True,
+                    tooltip="hatsune miku 같은 캐릭터명 태그를 포함합니다. 인원수와 외형 태그에는 영향을 주지 않습니다.",
+                ),
+                io.Boolean.Input(
+                    "include_copyright", display_name="작품 태그 포함", default=False, optional=True,
+                    tooltip="original, vocaloid 같은 작품·프랜차이즈 태그를 포함합니다.",
                 ),
             ],
             outputs=[io.String.Output("tags", is_output_list=True)],
         )
 
     @classmethod
-    def execute(cls, image, device, exclude_tags=DEFAULT_EXCLUDE_TAGS):
+    def execute(cls, image, device, exclude_tags="", include_rating=False,
+                include_character=False, include_copyright=False):
         models_dir = Path(folder_paths.models_dir).resolve() / "captioners"
         if device not in {"auto", "cpu"}:
             raise ValueError(f"Unsupported Anima Tagger device: {device}")
@@ -69,6 +79,12 @@ class SoyaAnimaTagger_mdsoya(io.ComfyNode):
                 "--input-dir", str(directory), "--output", str(result_path),
                 "--exclude-tags", exclude_tags,
             ]
+            if include_rating:
+                command.append("--include-rating")
+            if include_character:
+                command.append("--include-character")
+            if include_copyright:
+                command.append("--include-copyright")
             if device == "auto" and torch_device.type != "cpu":
                 # Leave room for the tagger weights and 1008px inference workspace.
                 comfy.model_management.free_memory(4 * 1024**3, torch_device)
