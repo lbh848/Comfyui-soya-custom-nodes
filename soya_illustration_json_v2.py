@@ -494,9 +494,12 @@ class SoyaMossPromptEncodeV2_mdsoya:
 
     def encode(self, clip, prompt_json, vae=None, image1=None, image2=None, image3=None):
         payload = read_payload(prompt_json)
+        sequential_offload = read_field(payload, "workflow.sequential_offload", False) is True
         reference = moss_reference(payload)
         if not reference:
-            return (clip.encode_from_tokens_scheduled(clip.tokenize(field_value(payload, "moss", "STRING"))),)
+            from .soya_moss_memory import moss_model_phase
+            with moss_model_phase(clip.patcher, sequential_offload, "text encoder"):
+                return (clip.encode_from_tokens_scheduled(clip.tokenize(field_value(payload, "moss", "STRING"))),)
         import folder_paths
         lora_name = str(reference.get("lora") or "").strip()
         if lora_name and lora_name not in folder_paths.get_filename_list("loras"):
@@ -505,7 +508,7 @@ class SoyaMossPromptEncodeV2_mdsoya:
         pictures = [entry for entry in (reference.get("pictures") or []) if isinstance(entry, dict)]
         images = [image for image in (image1, image2, image3) if image is not None][:len(pictures)]
         prompt = _moss_edit_prompt(payload, reference)
-        conditioning = encode_moss_edit(clip, prompt, vae, images)
+        conditioning = encode_moss_edit(clip, prompt, vae, images, sequential_offload=sequential_offload)
         logging.info(
             "[MOSS:CHARREF] prompt_head=%r pictures=%d ref_latents=%s",
             prompt[:180], len(pictures), reference_latent_shapes(conditioning),
@@ -527,11 +530,14 @@ class SoyaMossNegativeEncodeV2_mdsoya:
 
     def encode(self, clip, prompt_json):
         payload = read_payload(prompt_json)
+        sequential_offload = read_field(payload, "workflow.sequential_offload", False) is True
         negative = field_value(payload, "workflow.negative", "STRING")
         if moss_reference(payload):
             from .soya_moss_edit import encode_moss_edit
-            return (encode_moss_edit(clip, negative, None, []),)
-        return (clip.encode_from_tokens_scheduled(clip.tokenize(negative)),)
+            return (encode_moss_edit(clip, negative, None, [], sequential_offload=sequential_offload),)
+        from .soya_moss_memory import moss_model_phase
+        with moss_model_phase(clip.patcher, sequential_offload, "text encoder"):
+            return (clip.encode_from_tokens_scheduled(clip.tokenize(negative)),)
 
 
 class SoyaMossOptionalLoraV2_mdsoya:
@@ -647,7 +653,10 @@ class SoyaMossSwapTextEncodeV2_mdsoya:
             raise ValueError(f"JSON prompt requires a layout string at {caption_key}")
         text = text.strip()
         encoder = split_clip(clip) if has_hangul(text) else clip
-        return (encoder.encode_from_tokens_scheduled(encoder.tokenize(text)),)
+        from .soya_moss_memory import moss_model_phase
+        with moss_model_phase(encoder.patcher, read_field(payload, "workflow.sequential_offload", False) is True,
+                              "text encoder"):
+            return (encoder.encode_from_tokens_scheduled(encoder.tokenize(text)),)
 
 
 def register_illustration_v2(class_mappings, display_mappings):
@@ -862,6 +871,8 @@ def register_illustration_v2(class_mappings, display_mappings):
                 return kwargs
 
             def execute(self, prompt_json, **kwargs):
+                sequential_offload = (spec["base"] in {"CLIPTextEncode", "KSampler", "MossSpectrumKSampler"}
+                                      and read_field(read_payload(prompt_json), "workflow.sequential_offload", False) is True)
                 kwargs = self.prepare_inputs(prompt_json, kwargs)
                 if spec["base"] == "SoyaBatchLoraLoader_mdsoya":
                     # Style/background LoRAs stay merged and cached. Only the
@@ -886,12 +897,20 @@ def register_illustration_v2(class_mappings, display_mappings):
                     kwargs["_reference_model"] = partial(prepare_hand_model, clip=kwargs["clip"], **hand)
                 if not hasattr(self, "_implementation"):
                     self._implementation = base_class()()
+                def execute_implementation():
+                    execute = getattr(self._implementation, self._implementation.FUNCTION)
+                    if not sequential_offload:
+                        return execute(**kwargs)
+                    from .soya_moss_memory import moss_model_phase
+                    sampling = spec["base"] != "CLIPTextEncode"
+                    patcher = kwargs["model"] if sampling else kwargs["clip"].patcher
+                    with moss_model_phase(patcher, True, "DiT" if sampling else "text encoder",
+                                          release_after=sampling):
+                        return execute(**kwargs)
                 if reuse_outputs:
                     return reuse_resolved_output(
-                        self, kwargs,
-                        lambda: getattr(self._implementation, self._implementation.FUNCTION)(**kwargs),
-                        spec["name"])
-                return getattr(self._implementation, self._implementation.FUNCTION)(**kwargs)
+                        self, kwargs, execute_implementation, spec["name"])
+                return execute_implementation()
 
         if spec["base"] == "SoyaFirstSampler_mdsoya":
             # Queueing the same fixed seed explicitly requests another sample.

@@ -83,7 +83,7 @@ def _snap(samples, snap):
     return comfy.utils.common_upscale(samples, nw, nh, "area", "disabled")
 
 
-def encode_moss_edit(clip, prompt, vae=None, images=None):
+def encode_moss_edit(clip, prompt, vae=None, images=None, *, sequential_offload=False):
     """Encode ``prompt`` plus reference IMAGE tensors for a MOSS edit LoRA.
 
     ``images`` is an ordered list (Picture 1, Picture 2, ...). The MOSS Qwen3.5
@@ -107,7 +107,9 @@ def encode_moss_edit(clip, prompt, vae=None, images=None):
         if vae is not None:
             # no resize: the reference's resolution is the caller's call
             s = _snap(samples, REF_SNAP)
-            ref_latents.append(vae.encode(s.movedim(1, -1)[:, :, :, :3]))
+            from .soya_moss_memory import moss_model_phase
+            with moss_model_phase(vae.patcher, sequential_offload, "reference VAE"):
+                ref_latents.append(vae.encode(s.movedim(1, -1)[:, :, :, :3]))
         image_prompt += (
             "Picture {}: <|vision_start|><|image_pad|><|vision_end|>".format(
                 len(images_vl)
@@ -118,7 +120,9 @@ def encode_moss_edit(clip, prompt, vae=None, images=None):
     # moss_image tokenizer: the trained LoRA saw the Picture markers at the
     # start of the user content.
     tokens = clip.tokenize(image_prompt + prompt, images=images_vl)
-    conditioning = clip.encode_from_tokens_scheduled(tokens)
+    from .soya_moss_memory import moss_model_phase
+    with moss_model_phase(clip.patcher, sequential_offload, "text encoder"):
+        conditioning = clip.encode_from_tokens_scheduled(tokens)
     if len(ref_latents) > 0:
         conditioning = node_helpers.conditioning_set_values(
             conditioning, {"reference_latents": ref_latents}, append=True
