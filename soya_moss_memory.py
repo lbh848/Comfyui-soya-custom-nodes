@@ -56,17 +56,36 @@ def moss_model_phase(model, enabled, phase, *, release_after=False):
         yield
         return
 
+    import torch
+    import comfy_aimdo.control as aimdo_control
+
     active = [model, *model.get_nested_additional_models(), *model.model_patches_models()]
     active_ids = {patcher.clone_base_uuid for patcher in active}
     loaded = [patcher for patcher in model_management.loaded_models()
               if patcher is not None and patcher.load_device == device]
-    _offload_models([patcher for patcher in loaded if patcher.clone_base_uuid not in active_ids],
-                    device, phase)
-    yield
-    if release_after:
-        # Only release after successful sampling: do not mask an inference
-        # failure with another CUDA operation in a finally block.
-        loaded = [patcher for patcher in model_management.loaded_models()
-                  if patcher is not None and patcher.load_device == device
-                  and patcher.clone_base_uuid in active_ids]
-        _offload_models(loaded, device, phase + " complete")
+    previous_headroom = aimdo_control.get_simple_vram_headroom()
+    capacity = torch.cuda.get_device_properties(device).total_memory
+    # On the observed 8 GB device, the encoder alone stalled at ~6.5 GB
+    # framebuffer usage. Leave 3 GiB outside AIMDO's tracked allocation budget
+    # for activation bursts and driver/WDDM overhead. AIMDO counts both Torch
+    # allocations and weight pages, evicting weight pages as activations grow.
+    # This is a conservative opt-in budget, not a measured working-set size.
+    headroom = max(previous_headroom, min(3 * 1024 ** 3, capacity // 2))
+    aimdo_control.set_simple_vram_headroom(headroom)
+    logging.info("[Soya:MossMemory] %s: tracked VRAM budget %.1f MiB; headroom %.1f MiB",
+                 phase, max(0, capacity - headroom) / (1024 ** 2), headroom / (1024 ** 2))
+    try:
+        _offload_models([patcher for patcher in loaded if patcher.clone_base_uuid not in active_ids],
+                        device, phase)
+        yield
+        if release_after:
+            # Only release after successful sampling: do not mask an inference
+            # failure with another CUDA operation in a finally block.
+            loaded = [patcher for patcher in model_management.loaded_models()
+                      if patcher is not None and patcher.load_device == device
+                      and patcher.clone_base_uuid in active_ids]
+            _offload_models(loaded, device, phase + " complete")
+    finally:
+        # The public setter does not launch or synchronize CUDA work. Restore
+        # the user's process setting even when inference raises or is cancelled.
+        aimdo_control.set_simple_vram_headroom(previous_headroom)

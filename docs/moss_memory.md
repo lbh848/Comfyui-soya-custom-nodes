@@ -23,6 +23,15 @@ decode. Positive and negative encoding share the same encoder residency.
 Reference-image encoding also uses phase boundaries between its VAE and text
 encoder.
 
+During each controlled phase, AIMDO also keeps 3 GiB of headroom (at most half
+the device capacity, and never less than an existing larger user reservation).
+On an 8 GiB device this leaves about 5 GiB for AIMDO-tracked weights and Torch
+allocations. As activations grow, AIMDO can return weight pages to RAM instead
+of retaining the whole encoder. The previous reservation is restored after
+the phase, including when an exception is raised. This conservative budget
+still requires validation on the affected workload; it is not a hard cap on
+all driver allocations or a guarantee against Windows paging.
+
 Model objects, conditioning results, LoRA definitions, and DynamicVRAM host
 weight caches remain available in RAM. Uploads continue through ComfyUI's
 managed loading path. The option does not call full unload, discard host
