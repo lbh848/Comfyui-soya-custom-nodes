@@ -1719,7 +1719,7 @@
   },
   "SoyaMOSSi2iReferenceV2_moss_mdsoya": {
     "name": "SoyaMOSSi2iReferenceV2_moss_mdsoya",
-    "base": "MOSSi2iReference",
+    "base": "SoyaMossI2iReferenceV2_mdsoya",
     "display_name": "MOSS i2i Reference V2 (Soya JSON)",
     "json_inputs": {
       "lora_name": {
@@ -1738,7 +1738,7 @@
     "fixed_inputs": {
       "task": "auto",
       "ref_scale": 1,
-      "ref_cache": "gpu",
+      "ref_cache": "off",
       "bypass": false
     },
     "output": [
