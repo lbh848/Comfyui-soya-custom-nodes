@@ -18,6 +18,12 @@ from PIL import Image, ImageOps
 
 _MISSING = object()
 
+COMPOSITE_SAMPLERS = {
+    "SoyaFirstSampler_mdsoya", "SoyaHiresfixToggle_mdsoya", "SoyaHiresfixSpectrumToggle_mdsoya",
+    "SoyaCharLoraFaceDetailer_mdsoya", "SoyaCharLoraEyeDetailer_mdsoya", "SoyaHandDetailerToggle_mdsoya",
+}
+PHASE_NODES = COMPOSITE_SAMPLERS | {"CLIPTextEncode", "KSampler", "MossSpectrumKSampler", "VAEDecode"}
+
 
 # These nodes prepare reusable models or conditioning; none renders an image.
 # Keep reuse inside the V2 wrappers so the standard Comfy cache stays untouched.
@@ -497,8 +503,8 @@ class SoyaMossPromptEncodeV2_mdsoya:
         sequential_offload = read_field(payload, "workflow.sequential_offload", False) is True
         reference = moss_reference(payload)
         if not reference:
-            from .soya_moss_memory import moss_model_phase
-            with moss_model_phase(clip.patcher, sequential_offload, "text encoder"):
+            from .soya_model_memory import model_phase
+            with model_phase(clip.patcher, sequential_offload, "text encoder"):
                 return (clip.encode_from_tokens_scheduled(clip.tokenize(field_value(payload, "moss", "STRING"))),)
         import folder_paths
         lora_name = str(reference.get("lora") or "").strip()
@@ -535,8 +541,8 @@ class SoyaMossNegativeEncodeV2_mdsoya:
         if moss_reference(payload):
             from .soya_moss_edit import encode_moss_edit
             return (encode_moss_edit(clip, negative, None, [], sequential_offload=sequential_offload),)
-        from .soya_moss_memory import moss_model_phase
-        with moss_model_phase(clip.patcher, sequential_offload, "text encoder"):
+        from .soya_model_memory import model_phase
+        with model_phase(clip.patcher, sequential_offload, "text encoder"):
             return (clip.encode_from_tokens_scheduled(clip.tokenize(negative)),)
 
 
@@ -653,8 +659,8 @@ class SoyaMossSwapTextEncodeV2_mdsoya:
             raise ValueError(f"JSON prompt requires a layout string at {caption_key}")
         text = text.strip()
         encoder = split_clip(clip) if has_hangul(text) else clip
-        from .soya_moss_memory import moss_model_phase
-        with moss_model_phase(encoder.patcher, read_field(payload, "workflow.sequential_offload", False) is True,
+        from .soya_model_memory import model_phase
+        with model_phase(encoder.patcher, read_field(payload, "workflow.sequential_offload", False) is True,
                               "text encoder"):
             return (encoder.encode_from_tokens_scheduled(encoder.tokenize(text)),)
 
@@ -740,7 +746,7 @@ def register_illustration_v2(class_mappings, display_mappings):
                     for name in list(result.get(group, {})):
                         if (name in spec["json_inputs"] or name in spec.get("fixed_inputs", {})
                                 or sampling and name in sampling["inputs"]
-                                or model and name == model["input"]):
+                                or model and name == model["input"] and not model.get("fallback_widget")):
                             result[group].pop(name)
                 result.setdefault("required", {})["prompt_json"] = ("STRING", {"forceInput": True})
                 if spec["base"] == "CLIPTextEncode":
@@ -757,7 +763,7 @@ def register_illustration_v2(class_mappings, display_mappings):
                         "tooltip": "JSON settings object under fields. Reads " + ", ".join(sampling["inputs"])
                                    + ". Choose the ANIMA or ILXL block for this stage.",
                     })
-                if model:
+                if model and not model.get("fallback_widget"):
                     result.setdefault("optional", {})["model_key"] = ("STRING", {
                         "default": model["key"], "multiline": False,
                         "tooltip": "JSON field containing the installed model filename, e.g. " + model["key"]
@@ -792,7 +798,8 @@ def register_illustration_v2(class_mappings, display_mappings):
                     model_key = model_key.strip().removeprefix("fields.")
                     if not model_key:
                         raise ValueError("model_key must name a JSON field containing a model filename")
-                    filename = read_field(payload, model_key)
+                    fallback = kwargs.get(model["input"]) if model.get("fallback_widget") else None
+                    filename = read_field(payload, model_key, fallback)
                     if not isinstance(filename, str) or not filename.strip():
                         raise ValueError(f"JSON prompt requires a model filename at {model_key}")
                     filename = filename.strip()
@@ -870,13 +877,14 @@ def register_illustration_v2(class_mappings, display_mappings):
                                                   map_location="cpu", weights_only=True)
                         for entry in entries
                     }
+                if spec["base"] in PHASE_NODES:
+                    kwargs["_sequential_offload"] = read_field(payload, "workflow.sequential_offload", False) is True
                 del payload, fields
                 return kwargs
 
             def execute(self, prompt_json, **kwargs):
-                sequential_offload = (spec["base"] in {"CLIPTextEncode", "KSampler", "MossSpectrumKSampler"}
-                                      and read_field(read_payload(prompt_json), "workflow.sequential_offload", False) is True)
                 kwargs = self.prepare_inputs(prompt_json, kwargs)
+                sequential_offload = kwargs.pop("_sequential_offload", False)
                 if spec["base"] == "SoyaBatchLoraLoader_mdsoya":
                     # Style/background LoRAs stay merged and cached. Only the
                     # changing ANIMA character branch uses residual adapters.
@@ -886,6 +894,18 @@ def register_illustration_v2(class_mappings, display_mappings):
                     )
                 # The graph owns the shared source; this node no longer needs it.
                 del prompt_json
+                if (sequential_offload and spec["base"] in COMPOSITE_SAMPLERS
+                        and str(kwargs.get("enable", True)).strip().lower() in {"true", "1", "yes", "on"}):
+                    from .soya_model_memory import PhaseIO, sequential_sampling_model
+                    if kwargs.get("clip") is not None:
+                        kwargs["clip"] = PhaseIO(kwargs["clip"], "text encoder", {"encode_from_tokens", "encode_from_tokens_scheduled"})
+                    if kwargs.get("vae") is not None:
+                        kwargs["vae"] = PhaseIO(kwargs["vae"], "VAE", {"encode", "encode_tiled", "decode", "decode_tiled"})
+                    if spec["base"] == "SoyaFirstSampler_mdsoya":
+                        # Preserve the actual input patcher as the character LoRA cache key.
+                        kwargs["_sequential_offload"] = True
+                    else:
+                        kwargs["model"] = sequential_sampling_model(kwargs["model"])
                 regions = kwargs.pop("_hires_regions", None)
                 if regions is not None:
                     from .soya_illustration_stages import prepare_hires_model
@@ -902,19 +922,27 @@ def register_illustration_v2(class_mappings, display_mappings):
                     self._implementation = base_class()()
                 def execute_implementation():
                     execute = getattr(self._implementation, self._implementation.FUNCTION)
-                    if not sequential_offload:
+                    if not sequential_offload or spec["base"] in COMPOSITE_SAMPLERS:
                         return execute(**kwargs)
-                    from .soya_moss_memory import moss_model_phase
-                    sampling = spec["base"] != "CLIPTextEncode"
-                    patcher = kwargs["model"] if sampling else kwargs["clip"].patcher
-                    with moss_model_phase(patcher, True, "DiT" if sampling else "text encoder",
-                                          release_after=sampling):
+                    from .soya_model_memory import model_phase
+                    sampling = spec["base"] in {"KSampler", "MossSpectrumKSampler"}
+                    if sampling:
+                        patcher, phase = kwargs["model"], "DiT"
+                    elif spec["base"] == "VAEDecode":
+                        patcher, phase = kwargs["vae"].patcher, "VAE"
+                    else:
+                        patcher, phase = kwargs["clip"].patcher, "text encoder"
+                    with model_phase(patcher, True, phase, release_after=sampling):
                         return execute(**kwargs)
                 if reuse_outputs:
                     return reuse_resolved_output(
                         self, kwargs, execute_implementation, spec["name"])
                 return execute_implementation()
 
+        if model and model.get("fallback_widget"):
+            # The graph widget may name a different file than the prompt. Check
+            # the resolved filename against Comfy's inventory in prepare_inputs.
+            JsonNode.VALIDATE_INPUTS = staticmethod(lambda clip_name: isinstance(clip_name, str))
         if spec["base"] == "SoyaFirstSampler_mdsoya":
             # Queueing the same fixed seed explicitly requests another sample.
             # Only this node and its descendants are invalidated, not loaders.

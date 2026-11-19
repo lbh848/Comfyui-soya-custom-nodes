@@ -1,8 +1,49 @@
-"""Optional MOSS phase boundaries that retain the host weight caches."""
+"""Optional model phase boundaries that retain the host weight caches."""
 
 from contextlib import contextmanager
+from functools import wraps
 import logging
 import time
+
+
+class PhaseIO:
+    """Apply a phase at each actual encoder/decoder call inside a composite node."""
+
+    def __init__(self, component, phase, methods):
+        self.component = component
+        self.phase = phase
+        self.methods = methods
+
+    def __getattr__(self, name):
+        method = getattr(self.component, name)
+        if name not in self.methods:
+            return method
+
+        @wraps(method)
+        def run(*args, **kwargs):
+            with model_phase(self.component.patcher, True, self.phase):
+                return method(*args, **kwargs)
+        return run
+
+
+def _sampling_phase(executor, *args, **kwargs):
+    with model_phase(executor.class_obj.model_patcher, True, "DiT", release_after=True):
+        return executor(*args, **kwargs)
+
+
+def sequential_sampling_model(model):
+    """Start the DiT phase after any internal conditioning and SnapRef encoding."""
+    from comfy import memory_management
+    from comfy.patcher_extension import WrappersMP
+
+    if not memory_management.aimdo_enabled or model.load_device.type != "cuda":
+        return model
+    key = "soya_sequential_offload"
+    if model.get_wrappers(WrappersMP.OUTER_SAMPLE, key):
+        return model
+    patched = model.clone()
+    patched.add_wrapper_with_key(WrappersMP.OUTER_SAMPLE, key, _sampling_phase)
+    return patched
 
 
 def _offload_models(models, device, phase):
@@ -13,7 +54,7 @@ def _offload_models(models, device, phase):
     if not models:
         return
     started = time.monotonic()
-    logging.info("[Soya:MossMemory] %s: returning %d model(s) to RAM", phase, len(models))
+    logging.info("[Soya:ModelMemory] %s: returning %d model(s) to RAM", phase, len(models))
     with torch.cuda.device(device):
         # Complete previous work, including prefetch streams, before releasing
         # their VRAM mappings. This is a boundary, never an in-forward hook.
@@ -26,19 +67,19 @@ def _offload_models(models, device, phase):
             # LoRA patch caches registered for the next managed load.
             model.partially_unload(model.offload_device, 1e30)
             logging.info(
-                "[Soya:MossMemory] %s: %s VRAM %.1f -> %.1f MiB; host cache retained",
+                "[Soya:ModelMemory] %s: %s VRAM %.1f -> %.1f MiB; host cache retained",
                 phase, type(model.model).__name__, before / (1024 ** 2),
                 model.loaded_size() / (1024 ** 2),
             )
             if host_before is not None:
-                logging.info("[Soya:MossMemory] %s: host weights %.1f -> %.1f MiB",
+                logging.info("[Soya:ModelMemory] %s: host weights %.1f -> %.1f MiB",
                              phase, host_before / (1024 ** 2), model.loaded_ram_size() / (1024 ** 2))
         model_management.soft_empty_cache()
-    logging.info("[Soya:MossMemory] %s: handoff completed in %.3fs", phase, time.monotonic() - started)
+    logging.info("[Soya:ModelMemory] %s: handoff completed in %.3fs", phase, time.monotonic() - started)
 
 
 @contextmanager
-def moss_model_phase(model, enabled, phase, *, release_after=False):
+def model_phase(model, enabled, phase, *, release_after=False):
     """Keep the active model on its device and return inactive weights to RAM.
 
     Normal Comfy loaders still perform all uploads and patch registration.
@@ -72,7 +113,7 @@ def moss_model_phase(model, enabled, phase, *, release_after=False):
     # This is a conservative opt-in budget, not a measured working-set size.
     headroom = max(previous_headroom, min(3 * 1024 ** 3, capacity // 2))
     aimdo_control.set_simple_vram_headroom(headroom)
-    logging.info("[Soya:MossMemory] %s: tracked VRAM budget %.1f MiB; headroom %.1f MiB",
+    logging.info("[Soya:ModelMemory] %s: tracked VRAM budget %.1f MiB; headroom %.1f MiB",
                  phase, max(0, capacity - headroom) / (1024 ** 2), headroom / (1024 ** 2))
     try:
         _offload_models([patcher for patcher in loaded if patcher.clone_base_uuid not in active_ids],

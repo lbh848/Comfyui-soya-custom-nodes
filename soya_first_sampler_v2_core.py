@@ -653,7 +653,11 @@ class SoyaFirstSampler_mdsoya:
         spd_sigma,
         adaptive_smc_alpha,
         spectrum_options=None,
+        sequential_offload=False,
     ):
+        if sequential_offload:
+            from .soya_model_memory import sequential_sampling_model
+            model = sequential_sampling_model(model)
         if (
             spectrum_options is not None
             and sampler_mode != _SAMPLER_MODE_SPECTRUM_MOD_GUIDANCE
@@ -747,6 +751,7 @@ class SoyaFirstSampler_mdsoya:
         SNAPREF="",
         _embedded_region_masks=None,
         _embedded_reference_images=None,
+        _sequential_offload=False,
     ):
         try:
             if str(SNAPREF or "").strip():
@@ -838,6 +843,7 @@ class SoyaFirstSampler_mdsoya:
                     spd_sigma,
                     adaptive_smc_alpha,
                     spectrum_options,
+                    _sequential_offload,
                 )
                 return result[0], global_model, "[]"
 
@@ -940,6 +946,7 @@ class SoyaFirstSampler_mdsoya:
                 spd_sigma,
                 adaptive_smc_alpha,
                 spectrum_options,
+                _sequential_offload,
             )
             # 후단 HRF/디테일러에는 전역 all-character LoRA 모델이 아니라
             # 원래 clean model을 넘겨 첫 패스의 영역 분리를 재오염하지 않는다.

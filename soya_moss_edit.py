@@ -75,8 +75,8 @@ def encode_moss_edit(clip, prompt, vae=None, images=None, *, sequential_offload=
         if vae is not None:
             # no resize: the reference's resolution is the caller's call
             s = _snap(samples, REF_SNAP)
-            from .soya_moss_memory import moss_model_phase
-            with moss_model_phase(vae.patcher, sequential_offload, "reference VAE"):
+            from .soya_model_memory import model_phase
+            with model_phase(vae.patcher, sequential_offload, "reference VAE"):
                 ref_latents.append(vae.encode(s.movedim(1, -1)[:, :, :, :3]))
         image_prompt += (
             "Picture {}: <|vision_start|><|image_pad|><|vision_end|>".format(
@@ -88,8 +88,8 @@ def encode_moss_edit(clip, prompt, vae=None, images=None, *, sequential_offload=
     # moss_image tokenizer: the trained LoRA saw the Picture markers at the
     # start of the user content.
     tokens = clip.tokenize(image_prompt + prompt, images=images_vl)
-    from .soya_moss_memory import moss_model_phase
-    with moss_model_phase(clip.patcher, sequential_offload, "text encoder"):
+    from .soya_model_memory import model_phase
+    with model_phase(clip.patcher, sequential_offload, "text encoder"):
         conditioning = clip.encode_from_tokens_scheduled(tokens)
     if len(ref_latents) > 0:
         conditioning = node_helpers.conditioning_set_values(
