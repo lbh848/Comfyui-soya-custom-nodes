@@ -10,6 +10,8 @@ from .soya_vram_handoff import install_vram_handoff
 from .soya_illustration_json_v2 import image_tensor
 from .soya_gemma4_context import fit_history
 
+DEFAULT_VRAM_HEADROOM_MIB = 2048
+
 
 def decode_request(prompt_json):
     payload = json.loads(prompt_json)
@@ -51,6 +53,7 @@ class SoyaGemma4Vision_mdsoya:
                 "thinking_mode": (["on", "off"], {"default": "on"}),
                 "reasoning_budget": (["1024", "2048", "4096"], {"default": "2048"}),
                 "preload_only": ("BOOLEAN", {"default": False}),
+                "vram_headroom_mib": ("INT", {"default": DEFAULT_VRAM_HEADROOM_MIB, "min": 0, "max": 2147483647}),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "dynprompt": "DYNPROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -61,7 +64,8 @@ class SoyaGemma4Vision_mdsoya:
 
     def analyze(self, prompt_json, context_size, max_tokens, temperature, seed,
                 gpu_layers, gpu_device, binary_path, port,
-                unique_id=None, dynprompt=None, extra_pnginfo=None, thinking_mode="on", reasoning_budget="2048", preload_only=False):
+                unique_id=None, dynprompt=None, extra_pnginfo=None, thinking_mode="on", reasoning_budget="2048",
+                preload_only=False, vram_headroom_mib=DEFAULT_VRAM_HEADROOM_MIB):
         if str(reasoning_budget) not in ("1024", "2048", "4096"):
             raise ValueError("Gemma reasoning budget must be 1024, 2048, or 4096 tokens")
         image, prompt, history_ranges = (None, "", []) if preload_only else decode_request(prompt_json)
@@ -87,7 +91,7 @@ class SoyaGemma4Vision_mdsoya:
             model_path=str(resolution.model_path), mmproj_path=str(resolution.projector_path),
             context_size=context_size, n_gpu_layers=starter.parse_gpu_layers(gpu_layers), main_gpu=0,
             port=port, batch_size=256, flash_attention_mode="on", fit=True,
-            extra_args=("--device", f"CUDA{gpu_device}", "--split-mode", "none", "--fit-target", "2048",
+            extra_args=("--device", f"CUDA{gpu_device}", "--split-mode", "none", "--fit-target", str(vram_headroom_mib),
                         "--parallel", "1", "--jinja", "--reasoning-budget", str(reasoning_budget),
                         "--model-draft", str(draft_path), "--spec-type", "draft-mtp",
                         "--spec-draft-n-max", "2", "--spec-draft-ngl", "auto"),
