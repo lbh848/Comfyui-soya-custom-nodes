@@ -9,6 +9,7 @@ from functools import lru_cache, partial
 import torch
 
 import comfy.hooks
+import comfy.ops
 import comfy.patcher_extension
 import comfy.sd
 import comfy.utils
@@ -44,13 +45,20 @@ class _CharacterLoRAHook(comfy.hooks.TransformerOptionsHook):
         return cloned
 
 
+def is_linear_projection(module):
+    # ComfyUI mixed-precision Linear exposes the same feature dimensions and
+    # forward hooks as nn.Linear, but inherits from nn.Module instead.
+    return (isinstance(module, (torch.nn.Linear, comfy.ops.MixedPrecisionOp))
+            and hasattr(module, "in_features") and hasattr(module, "out_features"))
+
+
 def _merged_path_reason(model, patches):
     for key, entries in patches.items():
         if not key.endswith(".weight"):
             return f"{key}: residual path requires a linear or convolution weight"
         module = model.get_model_object(key[:-7])
         is_conv = isinstance(module, torch.nn.Conv2d)
-        if not isinstance(module, torch.nn.Linear) and not is_conv:
+        if not is_conv and not is_linear_projection(module):
             return f"{key}: {type(module).__name__} uses the native weight adapter"
         if is_conv and (module.groups != 1 or module.padding_mode != "zeros"):
             return f"{key}: grouped/nonzero-padding convolution needs native application"

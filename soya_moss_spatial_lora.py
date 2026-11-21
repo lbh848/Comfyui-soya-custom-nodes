@@ -12,13 +12,13 @@ import torch
 import comfy.lora
 import comfy.lora_convert
 import comfy.model_prefetch
-import comfy.ops
 import comfy.patcher_extension
 import comfy.utils
 from comfy.ldm.moss_image.model import MOSSImage
 from comfy.weight_adapter import LoRAAdapter, LoHaAdapter, LoKrAdapter
 
 from .soya_batch_lora_loader import SoyaBatchLoraLoader_mdsoya
+from .soya_character_lora import is_linear_projection
 
 _KEY = "soya_moss_spatial_lora"
 _BASE_KEY = "soya_moss_spatial_base"
@@ -215,10 +215,7 @@ def _spatial_patches(model, lora, slot, strength):
         if isinstance(adapter, LoRAAdapter) and adapter.weights[5] is not None:
             raise ValueError(f"MOSS BBox LoRA cannot reshape a base weight: {path}")
         module = model.get_model_object(target[:-7])
-        # Comfy's INT8 Linear inherits nn.Module + MixedPrecisionOp rather
-        # than nn.Linear. It exposes the same feature dimensions and hooks.
-        if not (isinstance(module, (torch.nn.Linear, comfy.ops.MixedPrecisionOp))
-                and hasattr(module, "in_features") and hasattr(module, "out_features")):
+        if not is_linear_projection(module):
             raise ValueError(f"MOSS BBox LoRA requires linear projections: {path} ({type(module).__qualname__})")
         patches.setdefault(path, []).append((slot, rows, strength, adapter))
     if not patches:
