@@ -949,7 +949,7 @@ class SoyaFirstSampler_mdsoya:
                             continue
                         face_positions.append({"name": payload["char_name_list"][index], "bbox": bbox})
                     if unique_id is not None:
-                        reference = runtime.tracker.export(size)
+                        reference = runtime.tracker.export(runtime.tracker.render_masks(size))
                         if reference is not None:
                             ui["soya_dynamic_mask"] = [reference]
                 if not face_positions:

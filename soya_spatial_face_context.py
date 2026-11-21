@@ -110,18 +110,22 @@ def assign_faces(boxes, names, *, mask=None, mask_names=(), panels=()):
     return sorted(selected)
 
 
+def expand_face_box(box, width, height, crop_top, crop_bottom):
+    """Apply the detector-box crop factors and clip to the image."""
+    x0, y0, x1, y1 = box
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    side = (crop_top + crop_bottom) / 2
+    return [max(0, int(cx - (x1 - x0) * side / 2)),
+            max(0, int(cy - (y1 - y0) * crop_top / 2)),
+            min(width, int(cx + (x1 - x0) * side / 2)),
+            min(height, int(cy + (y1 - y0) * crop_bottom / 2))]
+
+
 def make_context(boxes, assignments, width, height, crop_top, crop_bottom):
-    """Keep the legacy detector-box crop expansion and integer rounding exactly."""
     context = {"matches": [], "ipa_embeds": {}, "img_H": height, "img_W": width}
     for index, name, score, method in assignments:
         box = boxes[index]
-        x0, y0, x1, y1 = box
-        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        side = (crop_top + crop_bottom) / 2
-        crop = [max(0, int(cx - (x1 - x0) * side / 2)),
-                max(0, int(cy - (y1 - y0) * crop_top / 2)),
-                min(width, int(cx + (x1 - x0) * side / 2)),
-                min(height, int(cy + (y1 - y0) * crop_bottom / 2))]
+        crop = expand_face_box(box, width, height, crop_top, crop_bottom)
         if crop[2] <= crop[0] or crop[3] <= crop[1]:
             continue
         context["matches"].append({"name": name, "bbox": [float(v) for v in box], "crop": crop,

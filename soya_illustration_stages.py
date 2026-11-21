@@ -56,8 +56,7 @@ def prepare_hires_model(model, clip, vae, positive, image, *, multi, masks,
     background = clip.encode_from_tokens_scheduled(clip.tokenize(", ".join(part for part in parts if part)))
     references = {index + 1: images[name] for index, name in enumerate(names) if name in images}
     reference = _snapref(model, clip, vae, references, settings)
-    # HF keeps the supplied RGB ownership at its new resolution. It does not
-    # rerun first-pass face tracking or carry its mutable execution state.
+    # Reuse the supplied region ownership at the hires resolution.
     return apply_spatial_loras(model, loaded, masks, conditionings, background, snapref=reference)
 
 

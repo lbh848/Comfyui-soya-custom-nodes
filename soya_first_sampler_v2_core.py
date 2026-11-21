@@ -967,8 +967,14 @@ class SoyaFirstSampler_mdsoya:
                             print(f"[FACE_TRACK] Face outside returned canvas: index={index}, box={box}, size={size}")
                             continue
                         face_positions.append({"name": payload["char_name_list"][index], "bbox": bbox})
+                    tracked_masks = runtime.tracker.render_masks(size)
+                    if tracked_masks:
+                        from .soya_face_tracking import TRACKED_REGION_MASKS
+                        # Carry the applied masks on the clean model output for hires.fix.
+                        model = model.clone()
+                        model.set_attachments(TRACKED_REGION_MASKS, tracked_masks)
                     if unique_id is not None:
-                        reference = runtime.tracker.export(size)
+                        reference = runtime.tracker.export(tracked_masks)
                         if reference is not None:
                             ui["soya_dynamic_mask"] = [reference]
                 if not face_positions:

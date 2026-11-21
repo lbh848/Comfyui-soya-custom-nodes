@@ -12,6 +12,10 @@ import numpy as np
 import torch
 from PIL import Image
 
+from .soya_spatial_face_context import expand_face_box
+
+
+TRACKED_REGION_MASKS = "soya_tracked_region_masks"
 _detector_lock = threading.RLock()
 _detector_cache = None
 
@@ -164,12 +168,14 @@ class FaceTracker:
         centerlines = {}
         for subject, box in sorted(self.faces.items()):
             x0, y0, x1, y1 = box
-            dx, dy = (x1 - x0) * 0.2, (y1 - y0) * 0.2
+            crop_left, crop_top, crop_right, crop_bottom = expand_face_box(
+                box, self.width, self.height, crop_top=2.5, crop_bottom=1.0,
+            )
             rx, ry, rw, rh = self.regions[subject]
-            left = max(0, math.floor(min(rx * self.width, x0 - dx) / cell))
-            right = min(width, math.ceil(max((rx + rw) * self.width, x1 + dx) / cell))
-            top = max(0, math.floor(min(ry * self.height, y0 - dy) / cell))
-            bottom = min(height, math.ceil(max((ry + rh) * self.height, y1 + dy) / cell))
+            left = max(0, math.floor(min(rx * self.width, crop_left) / cell))
+            right = min(width, math.ceil(max((rx + rw) * self.width, crop_right) / cell))
+            top = max(0, math.floor(min(ry * self.height, crop_top) / cell))
+            bottom = min(height, math.ceil(max((ry + rh) * self.height, crop_bottom) / cell))
             coverage[subject].view(height, width)[top:bottom, left:right] = True
 
             # Distances use image pixels, including the actual padded token grid.
@@ -182,8 +188,8 @@ class FaceTracker:
             centerlines[subject] = ((fx, fy), (bx, by))
 
             guard = torch.zeros((height, width), device=device, dtype=torch.bool)
-            guard[max(0, math.floor((y0 - dy) / cell)):min(height, math.ceil((y1 + dy) / cell)),
-                  max(0, math.floor((x0 - dx) / cell)):min(width, math.ceil((x1 + dx) / cell))] = True
+            guard[crop_top // cell:min(height, math.ceil(crop_bottom / cell)),
+                  crop_left // cell:min(width, math.ceil(crop_right / cell))] = True
             face_scores[subject] = torch.where(guard.flatten(), (px - fx) ** 2 + (py - fy) ** 2, float("inf"))
             cores[subject].view(height, width)[
                 max(0, math.floor(y0 / cell)):min(height, math.ceil(y1 / cell)),
@@ -211,29 +217,33 @@ class FaceTracker:
         print(f"[FACE_TRACK_MASK] epoch={self.epoch}, centerlines={centerlines}, changed_tokens={changed}")
         return self.cached
 
-    def export(self, size):
+    def render_masks(self, size):
         if self.last_weights is None:
+            return ()
+        # Expand the actual patch cells, then crop padding added by the sampler.
+        weights = self.last_weights[1:]
+        cell_w = math.ceil(self.width / weights.shape[-1])
+        cell_h = math.ceil(self.height / weights.shape[-2])
+        pixels = weights.repeat(cell_h, axis=-2).repeat(cell_w, axis=-1)
+        width, height = size
+        return torch.from_numpy(pixels[:, :height, :width]).split(1)
+
+    def export(self, masks):
+        if not masks:
             print("[FACE_TRACK] No dynamic mask applied; retaining source preview")
             return None
         import folder_paths
         try:
-            # Reconstruct actual patch cells, including the sampler's padding,
-            # then crop to the original latent canvas (e.g. 1264 -> 1256).
-            weights = self.last_weights[1:]
-            rgb = np.zeros((*weights.shape[1:], 3), dtype=np.uint8)
-            rgb[:, :, :len(weights)] = np.moveaxis(np.clip(weights * 255, 0, 255).astype(np.uint8), 0, -1)
-            cell_w = math.ceil(self.width / rgb.shape[1])
-            cell_h = math.ceil(self.height / rgb.shape[0])
-            mask = Image.fromarray(rgb).resize(
-                (rgb.shape[1] * cell_w, rgb.shape[0] * cell_h), Image.Resampling.NEAREST,
-            ).crop((0, 0, *size))
+            rgb = np.zeros((*masks[0].shape[-2:], 3), dtype=np.uint8)
+            for index, mask in enumerate(masks):
+                rgb[:, :, index] = np.clip(mask[0].numpy() * 255, 0, 255).astype(np.uint8)
             subfolder = "soya_dynamic_masks"
             directory = Path(folder_paths.get_temp_directory()) / subfolder
             directory.mkdir(parents=True, exist_ok=True)
             filename = f"mask_{uuid.uuid4().hex}.png"
-            mask.save(directory / filename, format="PNG")
+            Image.fromarray(rgb).save(directory / filename, format="PNG")
             return {"filename": filename, "subfolder": subfolder, "type": "temp"}
         except Exception as exc:
-            print(f"[FACE_TRACK] Mask preview export failed: size={size}, error={exc}")
+            print(f"[FACE_TRACK] Mask preview export failed: size={masks[0].shape[-2:]}, error={exc}")
             traceback.print_exc()
             return None

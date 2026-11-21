@@ -844,8 +844,13 @@ def register_illustration_v2(class_mappings, display_mappings):
                     kwargs.update(_embedded_region_masks=masks, _embedded_reference_images=images)
                 elif spec["base"] in {"SoyaHiresfixToggle_mdsoya", "SoyaHiresfixSpectrumToggle_mdsoya"} and sampling["key"] == "ANIMA_HIRESFIX":
                     if str(kwargs["enable"]).strip().lower() in {"true", "1", "yes", "on"}:
+                        from .soya_face_tracking import TRACKED_REGION_MASKS
+                        multi = fields.get("MULTI_CHAR", {})
+                        tracked_masks = kwargs["model"].get_attachment(TRACKED_REGION_MASKS) if multi.get("enable") else None
+                        if tracked_masks:
+                            print("[FACE_TRACK_MASK] ANIMA hires.fix using tracked regional masks")
                         kwargs["_hires_regions"] = {
-                            "multi": fields.get("MULTI_CHAR", {}), "masks": regional_masks(payload),
+                            "multi": multi, "masks": tracked_masks or regional_masks(payload),
                             "lora_activate": fields.get("LORA_ACTIVATE", False),
                             "lora_data": fields.get("LORA_DATA", {"list": []}),
                             "images": stage_reference_images(payload, "hires"),
