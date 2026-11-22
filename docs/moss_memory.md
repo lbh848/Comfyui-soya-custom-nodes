@@ -24,7 +24,11 @@ Reference-image encoding also uses phase boundaries between its VAE and text
 encoder.
 
 For ANIMA, `workflow.clip` selects the installed text encoder filename.
-Older documents inherit the CLIP loader widget. The first sampler, high-resolution
+Older documents inherit the CLIP loader widget. `workflow.clip_device` accepts
+`"default"`, `"gpu"`, or `"cpu"` for both MOSS and ANIMA CLIP loaders
+(`"default"` follows ComfyUI's VRAM setting, `"gpu"` forces `load_device` to the
+active GPU while keeping ComfyUI's standard offload device, and `"cpu"` keeps
+the text encoder on CPU). The first sampler, high-resolution
 pass and detailers give the VAE, text encoder and DiT their own phases, including
 the encoding calls inside SnapRef and Spectrum.
 

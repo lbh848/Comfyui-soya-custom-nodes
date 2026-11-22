@@ -17,6 +17,7 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 _MISSING = object()
+CLIP_DEVICES = ("default", "gpu", "cpu")
 
 COMPOSITE_SAMPLERS = {
     "SoyaFirstSampler_mdsoya", "SoyaHiresfixToggle_mdsoya", "SoyaHiresfixSpectrumToggle_mdsoya",
@@ -34,6 +35,30 @@ REUSABLE_BASES = frozenset({
     "SkimmedCFG_LinInterp_CFG_PreCFG", "DCWModelPatch",
     "CLIPSetLastLayer", "CLIPTextEncode",
 })
+
+
+def _load_clip_on_gpu(implementation, *, clip_name, type="stable_diffusion"):
+    import comfy.model_management as model_management
+    import comfy.sd
+    import folder_paths
+
+    gpu_device = model_management.get_torch_device()
+    if model_management.is_device_cpu(gpu_device):
+        logging.warning(
+            "[Soya:CLIPDevice] GPU load requested for %s, but no GPU device is active; using default device.",
+            clip_name,
+        )
+        return implementation.load_clip(clip_name=clip_name, type=type, device="default")
+    clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
+    clip_path = folder_paths.get_full_path_or_raise("text_encoders", clip_name)
+    logging.info("[Soya:CLIPDevice] Loading text encoder %s on GPU (%s)", clip_name, gpu_device)
+    clip = comfy.sd.load_clip(
+        ckpt_paths=[clip_path],
+        embedding_directory=folder_paths.get_folder_paths("embeddings"),
+        clip_type=clip_type,
+        model_options={"load_device": gpu_device},
+    )
+    return (clip,)
 
 
 def resolved_input_signature(value):
@@ -701,6 +726,7 @@ def register_illustration_v2(class_mappings, display_mappings):
     def make_node(spec):
         sampling = spec.get("sampling")
         model = spec.get("model")
+        clip_device = spec.get("clip_device")
         reuse_outputs = spec["base"] in REUSABLE_BASES
 
         def base_class():
@@ -769,6 +795,8 @@ def register_illustration_v2(class_mappings, display_mappings):
                         "tooltip": "JSON field containing the installed model filename, e.g. " + model["key"]
                                    + ". The fields. prefix is optional.",
                     })
+                if clip_device and clip_device.get("fallback_widget"):
+                    result.setdefault("optional", {})[clip_device["input"]] = (list(CLIP_DEVICES), {"advanced": True})
                 if spec["base"] == "SoyaFirstSampler_mdsoya":
                     # Keep existing saved widget positions, including sampling_key.
                     optional = result["optional"]
@@ -808,6 +836,15 @@ def register_illustration_v2(class_mappings, display_mappings):
                     if filename not in declarations[model["input"]][0]:
                         raise ValueError(f"Model {filename!r} from {model_key} is not available for {spec['base']}")
                     resolved[model["input"]] = filename
+                if clip_device:
+                    device_value = read_field(payload, clip_device["key"])
+                    if device_value is not None:
+                        if not isinstance(device_value, str):
+                            raise ValueError(f"{clip_device['key']} must be default, gpu, or cpu: {device_value!r}")
+                        normalized_device = device_value.strip().lower()
+                        if normalized_device not in CLIP_DEVICES:
+                            raise ValueError(f"{clip_device['key']} must be default, gpu, or cpu: {device_value!r}")
+                        resolved[clip_device["input"]] = normalized_device
                 for name, binding in spec["json_inputs"].items():
                     if name == "text" and json_keys is not None:
                         values = []
@@ -926,6 +963,12 @@ def register_illustration_v2(class_mappings, display_mappings):
                 if not hasattr(self, "_implementation"):
                     self._implementation = base_class()()
                 def execute_implementation():
+                    if spec["base"] == "CLIPLoader" and kwargs.get("device") == "gpu":
+                        return _load_clip_on_gpu(
+                            self._implementation,
+                            clip_name=kwargs["clip_name"],
+                            type=kwargs.get("type", "stable_diffusion"),
+                        )
                     execute = getattr(self._implementation, self._implementation.FUNCTION)
                     if not sequential_offload or spec["base"] in COMPOSITE_SAMPLERS:
                         return execute(**kwargs)
