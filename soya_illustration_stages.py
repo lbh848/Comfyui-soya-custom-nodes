@@ -23,7 +23,7 @@ def _resolve_snapref_path(char_model, style_model, has_style):
                 continue
         raise FileNotFoundError(
             "STYLE_REF 모델(snapref_v2s_pre1.safetensors)을 찾을 수 없습니다. "
-            "설정의 업데이트 관리에서 누락 모델을 설치하거나 models/loras 폴더에 추가하세요."
+            "설정의 업데이트 → 개별적 업데이트 → 5. 누락 모델 다운로드로 설치하거나 models/loras 폴더에 추가하세요."
         )
     candidates = [char_model or "snapref_v2a_pre2.safetensors"]
     if candidates[0] == "snapref_v2a_pre2.safetensors":

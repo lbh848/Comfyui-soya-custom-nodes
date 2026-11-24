@@ -58,7 +58,7 @@ def resolve_snapref_model_path(resolve_lora_path, char_model="snapref_v2a_pre2.s
                 continue
         raise FileNotFoundError(
             f"STYLE_REF 모델({DEFAULT_STYLE_MODEL})을 찾을 수 없습니다. "
-            "설정의 업데이트 관리에서 누락 모델을 설치하거나 models/loras 폴더에 추가하세요."
+            "설정의 업데이트 → 개별적 업데이트 → 5. 누락 모델 다운로드로 설치하거나 models/loras 폴더에 추가하세요."
         )
     candidates = [char_model or "snapref_v2a_pre2.safetensors"]
     if candidates[0] == "snapref_v2a_pre2.safetensors":
