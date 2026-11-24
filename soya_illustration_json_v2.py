@@ -251,6 +251,32 @@ def stage_reference_images(payload, stage):
             for name, keys in stage_reference_assets(payload, stage).items()}
 
 
+def stage_style_reference_images(payload, stage):
+    settings = payload.get("fields", {}).get("STYLE_REF", {})
+    if not isinstance(settings, dict) or not settings.get("enabled"):
+        return []
+    if float(settings.get("strength", 1.0)) <= 0:
+        return []
+    if stage != "first" and not settings.get("apply_to_refiners", True):
+        return []
+    images = []
+    for item in settings.get("references", []):
+        if not isinstance(item, dict) or not item.get("asset"):
+            continue
+        weight = float(item.get("weight", 1.0))
+        if weight <= 0:
+            continue
+        images.append((image_tensor(payload, item["asset"]), weight))
+    return images
+
+
+def style_reference_settings(payload):
+    settings = payload.get("fields", {}).get("STYLE_REF", {})
+    if not isinstance(settings, dict):
+        return {}
+    return {key: value for key, value in settings.items() if key not in {"references", "images"}}
+
+
 def field_value(payload, key, dtype):
     value = read_field(payload, key)
     if value is None:
@@ -878,7 +904,12 @@ def register_illustration_v2(class_mappings, display_mappings):
                         raise ValueError("Multiple SnapRef references require regional RGB masks")
                     by_name = stage_reference_images(payload, "first")
                     images = {index + 1: by_name[name] for index, name in enumerate(names) if name in by_name}
-                    kwargs.update(_embedded_region_masks=masks, _embedded_reference_images=images)
+                    kwargs.update(
+                        _embedded_region_masks=masks,
+                        _embedded_reference_images=images,
+                        _embedded_style_references=stage_style_reference_images(payload, "first"),
+                        _style_reference_settings=style_reference_settings(payload),
+                    )
                 elif spec["base"] in {"SoyaHiresfixToggle_mdsoya", "SoyaHiresfixSpectrumToggle_mdsoya"} and sampling["key"] == "ANIMA_HIRESFIX":
                     if str(kwargs["enable"]).strip().lower() in {"true", "1", "yes", "on"}:
                         from .soya_face_tracking import TRACKED_REGION_MASKS
@@ -892,22 +923,29 @@ def register_illustration_v2(class_mappings, display_mappings):
                             "lora_data": fields.get("LORA_DATA", {"list": []}),
                             "images": stage_reference_images(payload, "hires"),
                             "settings": {key: value for key, value in fields.get("SNAPREF", {}).items() if key != "references"},
+                            "style_images": stage_style_reference_images(payload, "hires"),
+                            "style_settings": style_reference_settings(payload),
                         }
                 elif spec["base"] in {"SoyaCharLoraFaceDetailer_mdsoya", "SoyaCharLoraEyeDetailer_mdsoya"}:
                     if kwargs.get("base_model", "").strip() == "anima" and str(kwargs["enable"]).strip().lower() in {"true", "1", "yes"}:
                         stage = "face" if spec["base"] == "SoyaCharLoraFaceDetailer_mdsoya" else "eye"
                         kwargs["_reference_images"] = stage_reference_images(payload, stage)
                         kwargs["_reference_settings"] = {key: value for key, value in fields.get("SNAPREF", {}).items() if key != "references"}
+                        kwargs["_style_reference_images"] = stage_style_reference_images(payload, stage)
+                        kwargs["_style_reference_settings"] = style_reference_settings(payload)
                 elif spec["base"] == "SoyaHandDetailerToggle_mdsoya" and sampling["key"] == "ANIMA_HAND_DETAILER":
                     if str(kwargs["enable"]).strip().lower() in {"true", "1", "yes", "on"}:
                         images = stage_reference_images(payload, "hand")
-                        if images:
+                        style_images = stage_style_reference_images(payload, "hand")
+                        if images or style_images:
                             multi = fields.get("MULTI_CHAR", {})
                             kwargs["_hand_references"] = {
                                 "masks": regional_masks(payload),
                                 "names": multi["char_name_list"] if multi.get("enable") else list(images),
                                 "images": images,
                                 "settings": {key: value for key, value in fields.get("SNAPREF", {}).items() if key != "references"},
+                                "style_images": style_images,
+                                "style_settings": style_reference_settings(payload),
                             }
                 elif spec["base"] == "SoyaIPAPatchMaker_mdsoya":
                     import torch

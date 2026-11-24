@@ -393,7 +393,8 @@ class SoyaCharLoraEyeDetailer_mdsoya:
                 sampler_name, scheduler,
                 denoise, feather, noise_mask,
                 eyebrow_restore, eyebrow_opacity, eyebrow_th,
-                _reference_images=None, _reference_settings=None):
+                _reference_images=None, _reference_settings=None,
+                _style_reference_images=None, _style_reference_settings=None):
 
         B, H, W, C = image.shape
         use = enable.strip().lower() in ("true", "1", "yes")
@@ -610,10 +611,12 @@ class SoyaCharLoraEyeDetailer_mdsoya:
                 if noise_mask:
                     latent_dict["noise_mask"] = mask_batch
 
-                if _reference_images and base_model.strip() == "anima":
+                if (_reference_images or _style_reference_images) and base_model.strip() == "anima":
                     patched_model = prepare_detailer_model(
                         patched_model, clip, vae, positive_cond, mask_batch, name,
                         _reference_images, _reference_settings,
+                        style_images=_style_reference_images,
+                        style_settings=_style_reference_settings,
                     )
                 refined_latent = _run_ksampler(
                     patched_model, seed, steps, cfg,

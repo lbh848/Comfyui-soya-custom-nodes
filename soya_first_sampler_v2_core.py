@@ -751,6 +751,8 @@ class SoyaFirstSampler_mdsoya:
         SNAPREF="",
         _embedded_region_masks=None,
         _embedded_reference_images=None,
+        _embedded_style_references=None,
+        _style_reference_settings=None,
         _sequential_offload=False,
     ):
         try:
@@ -767,8 +769,11 @@ class SoyaFirstSampler_mdsoya:
                 FACE_ID_DIR = reference_settings.get("dir", FACE_ID_DIR)
             payload = _parse_multi_char(multi_char)
             snapref = None
+            style_settings = _style_reference_settings or {}
+            style_strength = float(style_settings.get("strength", 1.0))
+            style_active = bool(_embedded_style_references) and bool(style_settings.get("enabled", True)) and style_strength > 0
+            images = {}
             if snapref_enabled and snapref_strength > 0:
-                from .soya_snapref import SnapRef
                 if _embedded_reference_images is not None:
                     images = _embedded_reference_images
                 else:
@@ -780,7 +785,6 @@ class SoyaFirstSampler_mdsoya:
                     names = payload["char_name_list"] if payload["enable"] else [str(entry.get("CHAR") or "") for entry in entries]
                     if not payload["enable"] and len(names) > 1:
                         raise ValueError("여러 SnapRef 이미지는 캐릭터별 RGB 마스크가 필요합니다")
-                    images = {}
                     for index, name in enumerate(names):
                         entry = next((item for item in entries if str(item.get("CHAR") or "") == name), None)
                         if entry is None or not entry.get("ipa_path"):
@@ -805,13 +809,31 @@ class SoyaFirstSampler_mdsoya:
                         filename = os.path.relpath(files[0], folder_paths.get_input_directory()).replace("\\", "/")
                         images[index + 1] = SoyaRefImageLoader_mdsoya().doit(filename, 1024, 1024)[0]
                         print(f"[SnapRef] Bound char={name!r} to RGB region={index + 1}, image={filename!r}")
-                if images:
-                    if vae is None:
-                        raise ValueError("SnapRef 참조 이미지 인코딩에 VAE 연결이 필요합니다")
-                    snapref = SnapRef(model, clip, vae, images, _resolve_lora_path(snapref_model),
-                                      snapref_mode, snapref_megapixels, snapref_strength, snapref_fidelity)
+            if images or style_active:
+                from .soya_snapref import SnapRef, resolve_snapref_model_path
+                if vae is None:
+                    raise ValueError("SnapRef 참조 이미지 인코딩에 VAE 연결이 필요합니다")
+                model_path = resolve_snapref_model_path(
+                    _resolve_lora_path,
+                    snapref_model,
+                    style_settings.get("model", "snapref_v2s_pre1.safetensors"),
+                    has_style=style_active,
+                )
+                if style_active:
+                    snapref = SnapRef(
+                        model, clip, vae, images, model_path,
+                        snapref_mode, snapref_megapixels,
+                        snapref_strength if images else 0.0, snapref_fidelity,
+                        style_images=_embedded_style_references,
+                        style_megapixels=float(style_settings.get("megapixels", 1.0)),
+                        style_strength=style_strength,
+                        style_fidelity=float(style_settings.get("fidelity", 1.0)),
+                    )
                 else:
-                    print("[SnapRef] No representative images available; keeping existing sampler behavior")
+                    snapref = SnapRef(model, clip, vae, images, model_path,
+                                      snapref_mode, snapref_megapixels, snapref_strength, snapref_fidelity)
+            elif snapref_enabled and snapref_strength > 0:
+                print("[SnapRef] No representative images available; keeping existing sampler behavior")
             if not payload["enable"]:
                 lora_entries = _parse_lora_entries(LORA_ACT, LORA_DATA)
                 global_model = self._apply_global_loras(model, lora_entries)

@@ -70,6 +70,8 @@ def _token_weights(masks, latent_shape, patch_spatial, patch_temporal):
 
 
 def _route_residual(x, output, adapter, role, slot, weights, text_lengths):
+    if slot is None:
+        return output + adapter.h(x, output)
     if role == "text":
         start = sum(text_lengths[:slot])
         end = start + text_lengths[slot]
@@ -162,8 +164,7 @@ def _prepare_sampling_wrapper(executor, model, noise_shape, conds, model_options
         dtype = model.model.get_dtype_inference()
         target_entries = [(strength, source) for entries in runtime.patches.values()
                           for _slot, _role, strength, source in entries]
-        ref_entries = [(scale, source) for entries in runtime.snapref.adapter.patches["ref"].values()
-                       for scale, source, *_ in entries]
+        ref_entries = runtime.snapref.adapter.ref_entries_for_modes(runtime.snapref.active_modes)
         memory = runtime.snapref.memory_required(dit, dtype) + _adapter_memory(target_entries + ref_entries, dtype)
         devices = dict.fromkeys(patcher.load_device for patcher in [model] + model.get_additional_models_with_key("multigpu"))
         for device in devices:
@@ -212,6 +213,8 @@ def _diffusion_wrapper(executor, *args, **kwargs):
         unified, lengths = _unified_context(context, contexts, flags)
         weights, bias = runtime.layout(x.shape[-3:], dit, context.device, context.dtype, lengths)
         references = runtime.snapref.prepare(dit, x) if runtime.snapref is not None else {}
+        style_references = (runtime.snapref.prepare_style(dit, x)
+                            if runtime.snapref is not None and runtime.snapref.has_style else None)
         for path, entries in runtime.patches.items():
             # Resolve against this execution's diffusion model (also supports
             # model clones); never retain a module or device copy in the node.
@@ -223,7 +226,7 @@ def _diffusion_wrapper(executor, *args, **kwargs):
             attention = block.cross_attn
             attention_ops.append((attention, attention.attn_op))
             attention.attn_op = partial(_masked_attn_op, attn_bias=bias)
-            if references:
+            if references or style_references:
                 attention = block.self_attn
                 attention_ops.append((attention, attention.attn_op))
                 attention.attn_op = partial(
@@ -231,6 +234,8 @@ def _diffusion_wrapper(executor, *args, **kwargs):
                     {slot: records[index] for slot, records in references.items()},
                     weights, flags, runtime.snapref.strength,
                     fidelity=runtime.snapref.fidelity,
+                    style_reference=style_references[index] if style_references is not None else None,
+                    style_fidelity=runtime.snapref.style_fidelity,
                 )
         args = list(args)
         if len(args) > 2:
@@ -322,9 +327,10 @@ def apply_spatial_loras(model, loras, masks, conditionings, background, *, face_
         if not loras:
             print("[spatial LoRA] No character adapters; executing regional text conditioning only")
         if snapref is not None:
+            slots = [None] if snapref.has_style else list(snapref.refs)
             for path, entries in snapref.adapter.patches["tgt"].items():
                 role = roles[dit.get_submodule(path)]
-                for slot in snapref.refs:
+                for slot in slots:
                     for scale, adapter, _model_scale, _offset, _function in entries:
                         patches.setdefault(path, []).append((slot, role, scale, adapter))
         regions = [AnimaConditioningRegionChain(None, mask, cond, 1.0) for mask, cond in zip(masks, conditionings)]
