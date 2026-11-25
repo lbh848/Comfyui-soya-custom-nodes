@@ -279,40 +279,166 @@ class AnimaLLLiteApply:
         return (m,)
 
 
+def _bg_i2i_structure_image(
+    pixels: torch.Tensor,
+    target_w: int,
+    target_h: int,
+    mode: str = "lineart",
+) -> torch.Tensor:
+    """Convert BG_I2I reference image to a lighting-free structure image (B,H,W,3) in [0,1].
+
+    Resizes/center-crops to (target_w, target_h) to match sampler geometry, then
+    applies local-contrast lineart extraction by default so source brightness,
+    color temperature, and broad shadows cannot bleed into relit generations.
+    """
+    import comfy.utils
+    import numpy as np
+    from PIL import Image, ImageFilter, ImageOps
+
+    if pixels.shape[2] != target_w or pixels.shape[1] != target_h:
+        samples = pixels.movedim(-1, 1)
+        samples = comfy.utils.common_upscale(samples, target_w, target_h, "lanczos", "center")
+        pixels = samples.movedim(1, -1)
+
+    rgb_t = pixels[:1, :, :, :3].detach().cpu().clamp(0.0, 1.0)
+    normalized_mode = str(mode or "lineart").strip().lower()
+    if normalized_mode == "none":
+        return rgb_t
+
+    arr_u8 = np.rint(rgb_t[0].numpy() * 255.0).astype(np.uint8)
+    pil_img = Image.fromarray(arr_u8, mode="RGB")
+    if normalized_mode == "grayscale":
+        out_img = ImageOps.grayscale(pil_img).convert("RGB")
+        out_arr = np.asarray(out_img, dtype=np.float32) / 255.0
+    else:
+        # Local dark-edge contrast: flat skies, sunlit walls, and smooth shadows become
+        # pure white (255) while structural outlines stay crisp black ink.
+        radius = max(1, min(4, round(min(pil_img.size) / 512)))
+        arr_f = np.asarray(pil_img, dtype=np.float32)
+        background = np.asarray(
+            pil_img.filter(ImageFilter.MaxFilter(radius * 2 + 1)), dtype=np.float32
+        )
+        contrast = np.max(background - arr_f, axis=2)
+        ink = np.clip((contrast - 8.0) / 48.0, 0.0, 1.0)[..., None]
+        out_arr = np.clip(1.0 - ink, 0.0, 1.0).repeat(3, axis=2).astype(np.float32)
+    return torch.from_numpy(out_arr).unsqueeze(0)
+
+
 class SoyaAnimaLLLiteApply_mdsoya(AnimaLLLiteApply):
-    """Soya-owned Anima LLLite apply node with explicit failure diagnostics."""
+    """Soya-owned Anima LLLite apply node supporting both direct image/mask (inpaint)
+    and optional prompt_json BG_I2I conditional structure control."""
 
     CATEGORY = "Soya/Anima"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "lllite_name": (folder_paths.get_filename_list("controlnet"),),
+                "strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001}),
+                "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
+                "preserve_wrapper": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "image": ("IMAGE",),
+                "mask": ("MASK",),
+                "prompt_json": ("STRING", {"forceInput": True}),
+            },
+        }
 
     def apply(
         self,
         model,
         lllite_name,
-        image,
         strength,
         start_percent,
         end_percent,
         preserve_wrapper=True,
+        image=None,
         mask=None,
+        prompt_json=None,
     ):
         try:
-            return super().apply(
+            if image is not None:
+                return super().apply(
+                    model,
+                    lllite_name,
+                    image,
+                    strength,
+                    start_percent,
+                    end_percent,
+                    preserve_wrapper=preserve_wrapper,
+                    mask=mask,
+                )
+            if not prompt_json:
+                raise ValueError(
+                    "SoyaAnimaLLLiteApply_mdsoya에는 image 또는 prompt_json 입력이 필요합니다."
+                )
+
+            from .soya_illustration_json_v2 import _resolve_bg_i2i, read_payload
+
+            payload = read_payload(prompt_json)
+            bg_i2i = _resolve_bg_i2i(payload, "anima")
+            if bg_i2i is None:
+                logger.info("[ANIMA_LLLITE] BG_I2I disabled -> passthrough (normal T2I)")
+                return (model,)
+
+            raw_entry = (payload.get("fields") or {}).get("BG_I2I") or {}
+            preprocess_mode = str(raw_entry.get("preprocess") or "lineart").strip().lower()
+            cond_image = _bg_i2i_structure_image(
+                bg_i2i["image"],
+                int(bg_i2i["width"]),
+                int(bg_i2i["height"]),
+                mode=preprocess_mode,
+            )
+
+            # Map UI change-strength (denoise in 0.05..1.0) to LLLite control so lower values
+            # lock layout tighter and higher values allow freer variation while always sampling
+            # from empty noise (latent denoise=1.0) to prevent source lighting bleed.
+            ui_denoise = float(bg_i2i["denoise"])
+            if isinstance(raw_entry.get("lllite_strength"), (int, float)) and not isinstance(
+                raw_entry.get("lllite_strength"), bool
+            ):
+                eff_strength = float(raw_entry["lllite_strength"])
+            else:
+                eff_strength = float(strength) * max(0.45, min(1.15, 1.18 - 0.50 * ui_denoise))
+            if isinstance(raw_entry.get("lllite_end_percent"), (int, float)) and not isinstance(
+                raw_entry.get("lllite_end_percent"), bool
+            ):
+                eff_end = max(0.05, min(1.0, float(raw_entry["lllite_end_percent"])))
+            else:
+                eff_end = max(0.35, min(float(end_percent), 1.05 - 0.45 * ui_denoise))
+
+            print(
+                "[ANIMA_LLLITE] BG_I2I enabled -> applying structure LLLite: "
+                f"weights={lllite_name!r}, preprocess={preprocess_mode}, "
+                f"ui_denoise={ui_denoise:.3f}, strength={eff_strength:.3f}, "
+                f"range=[{float(start_percent):.3f}, {eff_end:.3f}], "
+                f"size={bg_i2i['width']}x{bg_i2i['height']}, source={bg_i2i.get('name', '')!r}"
+            )
+            (patched_model,) = super().apply(
                 model,
                 lllite_name,
-                image,
-                strength,
+                cond_image,
+                eff_strength,
                 start_percent,
-                end_percent,
+                eff_end,
                 preserve_wrapper=preserve_wrapper,
-                mask=mask,
+                mask=None,
             )
+            patched_model.model_options["soya_bg_i2i_lllite_active"] = True
+            return (patched_model,)
         except Exception as exc:
             print(
                 "[ANIMA_LLLITE] 적용 실패: "
                 f"weights={lllite_name!r}, strength={strength}, "
                 f"start={start_percent}, end={end_percent}, "
                 f"preserve_wrapper={preserve_wrapper}, "
+                f"image_connected={image is not None}, "
                 f"mask_connected={mask is not None}, "
+                f"prompt_json_connected={prompt_json is not None}, "
                 f"error={type(exc).__name__}: {exc}"
             )
             traceback.print_exc()

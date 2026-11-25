@@ -1111,13 +1111,22 @@ def register_illustration_v2(class_mappings, display_mappings):
                 bg_i2i = kwargs.pop("_bg_i2i", None)
                 moss_vae = kwargs.pop("vae", None) if spec["name"] == "SoyaKSamplerV2_moss_mdsoya" else None
                 if bg_i2i is not None:
-                    encode_vae = moss_vae if spec["name"] == "SoyaKSamplerV2_moss_mdsoya" else kwargs.get("vae")
-                    if encode_vae is None:
-                        raise ValueError("i2i 실행을 위해 VAE 연결이 필요합니다. 배경 전용 워크플로우를 선택하세요.")
-                    kwargs["latent_image"] = _encode_bg_i2i_latent(
-                        bg_i2i, encode_vae, sequential_offload=sequential_offload
-                    )
-                    kwargs["denoise"] = bg_i2i["denoise"]
+                    model_opts = getattr(kwargs.get("model"), "model_options", None)
+                    if isinstance(model_opts, dict) and model_opts.get("soya_bg_i2i_lllite_active"):
+                        logging.info(
+                            "[BG_I2I] ANIMA LLLite active -> sampling empty latent at denoise=1.0 "
+                            "(ui_denoise=%.3f source=%r)",
+                            bg_i2i["denoise"],
+                            bg_i2i.get("name", ""),
+                        )
+                    else:
+                        encode_vae = moss_vae if spec["name"] == "SoyaKSamplerV2_moss_mdsoya" else kwargs.get("vae")
+                        if encode_vae is None:
+                            raise ValueError("i2i 실행을 위해 VAE 연결이 필요합니다. 배경 전용 워크플로우를 선택하세요.")
+                        kwargs["latent_image"] = _encode_bg_i2i_latent(
+                            bg_i2i, encode_vae, sequential_offload=sequential_offload
+                        )
+                        kwargs["denoise"] = bg_i2i["denoise"]
                 regions = kwargs.pop("_hires_regions", None)
                 if regions is not None:
                     from .soya_illustration_stages import prepare_hires_model
