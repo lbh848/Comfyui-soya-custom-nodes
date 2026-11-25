@@ -155,6 +155,75 @@ def image_tensor(payload, key):
     return torch.from_numpy(rgb).unsqueeze(0)
 
 
+def _resolve_bg_i2i(payload, mode):
+    """Read optional background i2i payload (fields.BG_I2I for ANIMA, workflow.i2i for MOSS)."""
+    import math
+
+    if mode == "moss":
+        entry = (payload.get("workflow") or {}).get("i2i")
+        active_key = "activate"
+        width_key, height_key = "workflow.width", "workflow.height"
+    else:
+        entry = (payload.get("fields") or {}).get("BG_I2I")
+        active_key = "enabled"
+        width_key, height_key = "IMG_W", "IMG_H"
+
+    if not isinstance(entry, dict) or not entry.get(active_key):
+        return None
+    asset_id = entry.get("asset")
+    if not isinstance(asset_id, str) or asset_id not in (payload.get("assets") or {}):
+        raise ValueError("i2i가 켜져 있지만 기준 이미지 asset이 없습니다.")
+    raw_denoise = entry.get("denoise", 0.6)
+    if isinstance(raw_denoise, bool) or not isinstance(raw_denoise, (int, float)) or not math.isfinite(float(raw_denoise)):
+        raise ValueError(f"i2i denoise 값이 올바르지 않습니다: {raw_denoise!r}")
+    denoise = float(raw_denoise)
+    if not 0.05 <= denoise <= 1.0:
+        raise ValueError(f"i2i denoise는 0.05~1.0 사이여야 합니다: {denoise}")
+    target_w = field_value(payload, width_key, "INT")
+    target_h = field_value(payload, height_key, "INT")
+    if target_w < 64 or target_h < 64:
+        raise ValueError(f"i2i 출력 해상도를 확인하세요: {target_w}x{target_h}")
+    return {
+        "mode": mode,
+        "image": image_tensor(payload, asset_id),
+        "denoise": denoise,
+        "width": int(target_w),
+        "height": int(target_h),
+        "name": str(entry.get("name") or ""),
+    }
+
+
+def _encode_bg_i2i_latent(bg_i2i, vae, *, sequential_offload=False):
+    """Resize/center-crop the i2i base image to target resolution and VAE-encode it."""
+    import comfy.utils
+
+    pixels = bg_i2i["image"]
+    target_w, target_h = int(bg_i2i["width"]), int(bg_i2i["height"])
+    if pixels.shape[2] != target_w or pixels.shape[1] != target_h:
+        samples = pixels.movedim(-1, 1)
+        samples = comfy.utils.common_upscale(samples, target_w, target_h, "lanczos", "center")
+        pixels = samples.movedim(1, -1)
+
+    rgb = pixels[:, :, :, :3]
+    if sequential_offload and hasattr(vae, "patcher") and type(vae).__name__ != "PhaseIO":
+        from .soya_model_memory import model_phase
+        with model_phase(vae.patcher, True, "VAE"):
+            latent = vae.encode(rgb)
+    else:
+        latent = vae.encode(rgb)
+
+    logging.info(
+        "[BG_I2I] %s enabled: denoise=%.3f size=%dx%d latent=%s source=%r",
+        bg_i2i["mode"].upper(),
+        bg_i2i["denoise"],
+        target_w,
+        target_h,
+        tuple(latent.shape) if hasattr(latent, "shape") else type(latent).__name__,
+        bg_i2i.get("name", ""),
+    )
+    return {"samples": latent}
+
+
 def mask_tensor(payload, key):
     import numpy as np
     import torch
@@ -849,6 +918,8 @@ def register_illustration_v2(class_mappings, display_mappings):
                     optional["snapref_fidelity"] = optional.pop("snapref_fidelity")
                 if spec["base"] == "SoyaHiresfixToggle_mdsoya" and sampling["key"] == "ANIMA_HIRESFIX":
                     result.setdefault("optional", {})["clip"] = ("CLIP",)
+                if spec["name"] == "SoyaKSamplerV2_moss_mdsoya":
+                    result.setdefault("optional", {})["vae"] = ("VAE",)
                 return result
 
             def prepare_inputs(self, prompt_json, kwargs):
@@ -954,6 +1025,13 @@ def register_illustration_v2(class_mappings, display_mappings):
                         _embedded_style_references=stage_style_reference_images(payload, "first"),
                         _style_reference_settings=style_reference_settings(payload),
                     )
+                    bg_i2i = _resolve_bg_i2i(payload, "anima")
+                    if bg_i2i is not None:
+                        kwargs["_bg_i2i"] = bg_i2i
+                elif spec["name"] == "SoyaKSamplerV2_moss_mdsoya":
+                    bg_i2i = _resolve_bg_i2i(payload, "moss")
+                    if bg_i2i is not None:
+                        kwargs["_bg_i2i"] = bg_i2i
                 elif spec["base"] in {"SoyaHiresfixToggle_mdsoya", "SoyaHiresfixSpectrumToggle_mdsoya"} and sampling["key"] == "ANIMA_HIRESFIX":
                     if str(kwargs["enable"]).strip().lower() in {"true", "1", "yes", "on"}:
                         from .soya_face_tracking import TRACKED_REGION_MASKS
@@ -1030,6 +1108,16 @@ def register_illustration_v2(class_mappings, display_mappings):
                         kwargs["_sequential_offload"] = True
                     else:
                         kwargs["model"] = sequential_sampling_model(kwargs["model"])
+                bg_i2i = kwargs.pop("_bg_i2i", None)
+                moss_vae = kwargs.pop("vae", None) if spec["name"] == "SoyaKSamplerV2_moss_mdsoya" else None
+                if bg_i2i is not None:
+                    encode_vae = moss_vae if spec["name"] == "SoyaKSamplerV2_moss_mdsoya" else kwargs.get("vae")
+                    if encode_vae is None:
+                        raise ValueError("i2i 실행을 위해 VAE 연결이 필요합니다. 배경 전용 워크플로우를 선택하세요.")
+                    kwargs["latent_image"] = _encode_bg_i2i_latent(
+                        bg_i2i, encode_vae, sequential_offload=sequential_offload
+                    )
+                    kwargs["denoise"] = bg_i2i["denoise"]
                 regions = kwargs.pop("_hires_regions", None)
                 if regions is not None:
                     from .soya_illustration_stages import prepare_hires_model
