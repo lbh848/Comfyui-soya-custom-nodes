@@ -18,6 +18,18 @@ from PIL import Image, ImageOps
 
 _MISSING = object()
 CLIP_DEVICES = ("default", "gpu", "cpu")
+MOSS_HIRESFIX_NODES = frozenset({
+    "SoyaScaleByV2_moss_mdsoya",
+    "SoyaHiresfixToggleV2_moss_mdsoya",
+    "SoyaResizeToggleV2_moss_mdsoya",
+})
+MOSS_HIRESFIX_BYPASS_SAMPLING = {
+    "steps": 1,
+    "cfg": 1.0,
+    "sampler_name": "euler",
+    "scheduler": "simple",
+    "denoise": 0.25,
+}
 
 COMPOSITE_SAMPLERS = {
     "SoyaFirstSampler_mdsoya", "SoyaHiresfixToggle_mdsoya", "SoyaHiresfixSpectrumToggle_mdsoya",
@@ -419,6 +431,14 @@ def moss_reference(payload):
     """The active ``workflow.reference`` object, or an empty dict."""
     reference = read_field(payload, "workflow.reference", {})
     return reference if isinstance(reference, dict) and reference.get("activate") else {}
+
+
+def _moss_hiresfix_enabled(payload):
+    """True when MOSS hires.fix is explicitly switched on in the controller."""
+    value = read_field(payload, "workflow.hiresfix.activate", False)
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"true", "1", "yes", "on"}
 
 
 # CharRef reference latents are cached as attention K/V for the whole run.
@@ -871,16 +891,37 @@ def register_illustration_v2(class_mappings, display_mappings):
                         if normalized_device not in CLIP_DEVICES:
                             raise ValueError(f"{clip_device['key']} must be default, gpu, or cpu: {device_value!r}")
                         resolved[clip_device["input"]] = normalized_device
-                for name, binding in spec["json_inputs"].items():
-                    if name == "text" and json_keys is not None:
-                        values = []
-                        for key in json_keys:
-                            if read_field(payload, key, _MISSING) is _MISSING:
-                                raise ValueError(f"JSON prompt is missing {key}; check json_key on this CLIP Text Encode node")
-                            values.append(field_value(payload, key, binding["type"]))
-                        resolved[name] = ", ".join(value for value in values if value)
-                    else:
-                        resolved[name] = field_value(payload, binding["key"], binding["type"])
+                moss_hiresfix_bypass = spec["name"] in MOSS_HIRESFIX_NODES and not _moss_hiresfix_enabled(payload)
+                if moss_hiresfix_bypass:
+                    if spec["name"] == "SoyaScaleByV2_moss_mdsoya":
+                        resolved["scale_by"] = 1.0
+                    elif spec["name"] == "SoyaResizeToggleV2_moss_mdsoya":
+                        resolved["enable"] = "false"
+                        resolved["target_width"] = (
+                            field_value(payload, "workflow.width", "INT")
+                            if read_field(payload, "workflow.width") is not None else 0
+                        )
+                        resolved["target_height"] = (
+                            field_value(payload, "workflow.height", "INT")
+                            if read_field(payload, "workflow.height") is not None else 0
+                        )
+                    elif spec["name"] == "SoyaHiresfixToggleV2_moss_mdsoya":
+                        resolved["enable"] = "false"
+                        resolved["seed"] = (
+                            field_value(payload, "workflow.seed", "INT")
+                            if read_field(payload, "workflow.seed") is not None else 0
+                        )
+                else:
+                    for name, binding in spec["json_inputs"].items():
+                        if name == "text" and json_keys is not None:
+                            values = []
+                            for key in json_keys:
+                                if read_field(payload, key, _MISSING) is _MISSING:
+                                    raise ValueError(f"JSON prompt is missing {key}; check json_key on this CLIP Text Encode node")
+                                values.append(field_value(payload, key, binding["type"]))
+                            resolved[name] = ", ".join(value for value in values if value)
+                        else:
+                            resolved[name] = field_value(payload, binding["key"], binding["type"])
                 if sampling:
                     sampling_key = kwargs.pop("sampling_key", sampling["key"])
                     if self.INPUT_IS_LIST:
@@ -888,9 +929,12 @@ def register_illustration_v2(class_mappings, display_mappings):
                     sampling_key = sampling_key.strip().removeprefix("fields.")
                     if not sampling_key:
                         raise ValueError("sampling_key must name a JSON settings object")
-                    schema = base_class().INPUT_TYPES()
-                    declarations = {**schema.get("required", {}), **schema.get("optional", {})}
-                    resolved.update(sampling_values(payload, sampling_key, sampling, declarations))
+                    if moss_hiresfix_bypass and read_field(payload, sampling_key) is None:
+                        resolved.update(MOSS_HIRESFIX_BYPASS_SAMPLING)
+                    else:
+                        schema = base_class().INPUT_TYPES()
+                        declarations = {**schema.get("required", {}), **schema.get("optional", {})}
+                        resolved.update(sampling_values(payload, sampling_key, sampling, declarations))
                 if self.INPUT_IS_LIST:
                     resolved = {key: [value] for key, value in resolved.items()}
                 kwargs.update(resolved)
