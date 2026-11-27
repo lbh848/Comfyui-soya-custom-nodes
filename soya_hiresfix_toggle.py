@@ -55,13 +55,15 @@ class SoyaHiresfixToggle_mdsoya:
         print(f"[SoyaHiresfixToggle] ENABLED — running hires.fix pipeline (tiled_vae={use_tiled})")
 
         # 1. VAE encode
+        in_channels = getattr(vae, "output_channels", 3)
+        encode_pixels = image[:, :, :, :in_channels]
         if use_tiled:
             latent = vae.encode_tiled(
-                image[:, :, :, :3],
+                encode_pixels,
                 tile_x=tile_size, tile_y=tile_size, overlap=tile_size // 8,
             )
         else:
-            latent = vae.encode(image[:, :, :, :3])
+            latent = vae.encode(encode_pixels)
         latent_dict = {"samples": latent}
 
         # 2. KSampler

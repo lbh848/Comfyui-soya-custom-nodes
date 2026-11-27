@@ -49,6 +49,100 @@ REUSABLE_BASES = frozenset({
 })
 
 
+def _is_flux2_rgba_vae_file(path):
+    """Peek at a safetensors header to detect 4-channel Flux2 RGBA VAEs without full I/O."""
+    import struct
+
+    if not str(path).lower().endswith(".safetensors"):
+        return False
+    try:
+        with open(path, "rb") as handle:
+            raw_len = handle.read(8)
+            if len(raw_len) != 8:
+                return False
+            header_len = struct.unpack("<Q", raw_len)[0]
+            if not 2 <= header_len <= 16 * 1024 * 1024:
+                return False
+            header = json.loads(handle.read(header_len).decode("utf-8"))
+    except (OSError, ValueError, struct.error):
+        return False
+    if not isinstance(header, dict) or "bn.running_mean" not in header:
+        return False
+    enc = header.get("encoder.conv_in.weight")
+    dec_in = header.get("decoder.conv_in.weight")
+    dec_out = header.get("decoder.conv_out.weight")
+    return (
+        isinstance(enc, dict) and isinstance(enc.get("shape"), list)
+        and len(enc["shape"]) == 4 and enc["shape"][1] == 4
+        and isinstance(dec_in, dict) and isinstance(dec_in.get("shape"), list)
+        and len(dec_in["shape"]) == 4
+        and isinstance(dec_out, dict) and isinstance(dec_out.get("shape"), list)
+        and len(dec_out["shape"]) == 4 and dec_out["shape"][0] == 4
+    )
+
+
+def _load_vae_with_rgba_support(implementation, *, vae_name):
+    """Load a VAE, handling 4-channel Flux2 RGBA VAEs that stock VAELoader rejects."""
+    import comfy.ldm.modules.diffusionmodules.model
+    import comfy.sd
+    import comfy.utils
+    import folder_paths
+
+    if vae_name == "pixel_space" or vae_name.startswith(("tae",)):
+        return implementation.load_vae(vae_name=vae_name)
+
+    vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
+    if not _is_flux2_rgba_vae_file(vae_path):
+        return implementation.load_vae(vae_name=vae_name)
+
+    sd, metadata = comfy.utils.load_torch_file(vae_path, return_metadata=True)
+    if "decoder.post_quant_conv.weight" in sd:
+        sd = comfy.utils.state_dict_prefix_replace(
+            sd,
+            {"decoder.post_quant_conv.": "post_quant_conv.", "encoder.quant_conv.": "quant_conv."},
+        )
+    z_channels = int(sd["decoder.conv_in.weight"].shape[1])
+    in_channels = int(sd["encoder.conv_in.weight"].shape[1])
+    out_ch = int(sd["decoder.conv_out.weight"].shape[0])
+    ch = int(sd["encoder.conv_in.weight"].shape[0])
+    ch_mult = [1, 2, 4, 4]
+    ddconfig = {
+        "double_z": True,
+        "z_channels": z_channels,
+        "resolution": 256,
+        "in_channels": in_channels,
+        "out_ch": out_ch,
+        "ch": ch,
+        "ch_mult": ch_mult,
+        "num_res_blocks": 2,
+        "attn_resolutions": [],
+        "dropout": 0.0,
+        "batch_norm_latent": True,
+        "fused_norm": True,
+    }
+    decoder_ch = int(sd["decoder.conv_in.weight"].shape[0]) // ch_mult[-1]
+    embed_dim = int(sd["post_quant_conv.weight"].shape[1]) if "post_quant_conv.weight" in sd else z_channels
+    params = {"ddconfig": ddconfig, "embed_dim": embed_dim}
+    if decoder_ch != ch:
+        params["decoder_ddconfig"] = {**ddconfig, "ch": decoder_ch}
+    vae = comfy.sd.VAE(sd=sd, config={"params": params}, metadata=metadata)
+    vae.downscale_ratio = 16
+    vae.upscale_ratio = 16
+    vae.latent_channels = z_channels * 4
+    vae.output_channels = out_ch
+    vae.pad_channel_value = 1.0
+    old_memory_used_decode = vae.memory_used_decode
+    vae.memory_used_decode = lambda shape, dtype: old_memory_used_decode(shape, dtype) * (
+        1.0 if comfy.ldm.modules.diffusionmodules.model.fused_norm_served(vae.device, dtype) else 4.0
+    )
+    vae.throw_exception_if_invalid()
+    logging.info(
+        "[Soya:RGBAVAE] Loaded 4-channel Flux2 RGBA VAE %s (z=%d, ch=%d, dec_ch=%d, dtype=%s)",
+        vae_name, z_channels, ch, decoder_ch, vae.vae_dtype,
+    )
+    return (vae,)
+
+
 def _load_clip_on_gpu(implementation, *, clip_name, type="stable_diffusion"):
     import comfy.model_management as model_management
     import comfy.sd
@@ -1147,6 +1241,11 @@ def register_illustration_v2(class_mappings, display_mappings):
                             self._implementation,
                             clip_name=kwargs["clip_name"],
                             type=kwargs.get("type", "stable_diffusion"),
+                        )
+                    if spec["base"] == "VAELoader":
+                        return _load_vae_with_rgba_support(
+                            self._implementation,
+                            vae_name=kwargs["vae_name"],
                         )
                     execute = getattr(self._implementation, self._implementation.FUNCTION)
                     if not sequential_offload or spec["base"] in COMPOSITE_SAMPLERS:
